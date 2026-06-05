@@ -1,0 +1,8 @@
+# Go build output
+/bin/
+*.test
+*.out
+coverage.txt
+
+# Reference clone of gost-engine (vectors source of truth, not part of build).
+tmp/

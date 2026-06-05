@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.24', 'stable']
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      # gostcrypto is pure-Go, BSD-2-Clause, zero third-party dependencies.
+      # Build, vet and test run CGO-free; the race detector needs cgo, so it
+      # gets its own step with CGO_ENABLED=1.
+      - name: build
+        run: CGO_ENABLED=0 go build ./...
+
+      - name: vet
+        run: CGO_ENABLED=0 go vet ./...
+
+      - name: test
+        run: CGO_ENABLED=0 go test ./...
+
+      - name: test -race
+        run: CGO_ENABLED=1 go test -race ./...

@@ -1,0 +1,58 @@
+name: parity
+
+# Runs the clean-room <-> gogost differential parity suite against THIS commit.
+#
+# The parity tests live in the separate GPL-3 module gostcrypto-compat, which
+# wires this module in via `replace github.com/bigbes/gostcrypto => ../gostcrypto`.
+# So we lay the two repos out as siblings and run compat's tests: they build
+# against the gostcrypto code under test (the PR/branch), not gostcrypto master.
+#
+# This is test-only: GPL gogost is checked out into the runner but never enters
+# gostcrypto's own module graph.
+#
+# Make the `parity` job a REQUIRED status check on master (branch protection) so
+# a PR that breaks parity cannot be merged.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      compat-ref:
+        description: "gostcrypto-compat ref to test against (branch/tag/sha)"
+        type: string
+        default: master
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      # This repo (the commit under test) -> ./gostcrypto
+      - uses: actions/checkout@v4
+        with:
+          path: gostcrypto
+
+      # The parity tests + vendored gogost reference -> ./gostcrypto-compat.
+      # Its `replace ../gostcrypto` resolves to the checkout above.
+      # If gostcrypto-compat is private, add `token: ${{ secrets.COMPAT_RO_PAT }}`
+      # with a PAT/Deploy key that can read it (the default GITHUB_TOKEN is
+      # scoped to this repo only).
+      - uses: actions/checkout@v4
+        with:
+          repository: bigbes/gostcrypto-compat
+          ref: ${{ github.event.inputs.compat-ref || 'master' }}
+          path: gostcrypto-compat
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      # No go.work in the CI layout, so each module resolves standalone via its
+      # own replace directives (gostcrypto -> ../gostcrypto, gogost -> vendored).
+      - name: parity (clean-room vs gogost, byte-for-byte)
+        working-directory: gostcrypto-compat
+        run: go test ./...
