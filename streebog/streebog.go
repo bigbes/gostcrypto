@@ -171,19 +171,21 @@ var roundConstants = [12][64]byte{
 }
 
 // ---------------------------------------------------------------------------
-// LPS precompute table.
+// LP precompute table.
 //
 // The state is held as [8]uint64, where word[k] packs little-endian bytes
 // [8k..8k+7]: word[k] = b[8k] | b[8k+1]<<8 | ... | b[8k+7]<<56.
 //
-// Because S substitutes each byte independently and P, L are GF(2)-linear, the
-// full L(P(S(a))) decomposes as an XOR over the 64 input byte positions:
+// Because P and L are GF(2)-linear, the combined L(P(·)) decomposes as an XOR
+// over the 64 input byte positions:
 //
-//	LPS(a) = XOR over p in 0..63 of lpsTable[p][a_byte_p]
+//	LP(a) = XOR over p in 0..63 of lpTable[p][a_byte_p]
 //
-// where a_byte_p is the byte at little-endian position p. lpsTable is computed
-// in init() from pi/tau/matrixA so the S/P/L composition order is explicit and
-// independently testable (lpsCompose vs the table; LPS(0)==0).
+// where a_byte_p is the byte at little-endian position p. S (the nonlinear pi
+// substitution) is NOT folded into the table — pi[0]=0xfc≠0, so LP(0)==0 but
+// LPS(0)≠0. S is instead applied at lookup time in lps() (see below).
+// lpTable is built in init() by calling linearLP (pure L∘P, no S), making the
+// table derivation independently reviewable from the spec constants.
 // ---------------------------------------------------------------------------.
 
 // lpTable[p][v] = L(P(b)) where b is the LE buffer holding byte value v at
