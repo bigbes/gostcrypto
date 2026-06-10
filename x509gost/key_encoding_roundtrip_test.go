@@ -116,7 +116,7 @@ func TestKeyEncoding_SPKI_PEM_DER_RoundTrip(t *testing.T) {
 				t.Fatalf("curve OID = %v, want %v", gotCurveOID, tc.curveOID)
 			}
 
-			gotPubRaw, err := extractGOSTPubKeyBytes(spki.PublicKey.Bytes)
+			gotPubRaw, err := extractGOSTPubKeyBytes(spki.PublicKey.Bytes, 2*curve.PointSize())
 			if err != nil {
 				t.Fatalf("extractGOSTPubKeyBytes: %v", err)
 			}

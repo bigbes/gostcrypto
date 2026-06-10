@@ -38,10 +38,9 @@ func TestCTR_Kuznyechik_KAT(t *testing.T) {
 			"00112233445566778899aabbcceeff0a"+
 			"112233445566778899aabbcceeff0a00"+
 			"2233445566778899aabbcceeff0a0011")
-	// 64-byte expected; guide pins anchors f195d8be...20bdba73 (the plain-CTR
-	// keystream, distinct from the ACPKM vector past the first section). Tail
-	// bytes derived from this clean-room impl and consistent with the guide's
-	// stated end anchor 20bdba73.
+	// 64-byte expected ciphertext from GOST R 34.13-2015 Table A.2 (all four
+	// blocks f195d8be...20bdba73 appear verbatim in the standard).
+	// Source: ctracpkm/rfc/GOST_R_34.13-2015.pdf, Table A.2, pp. 25-26.
 	want := mustHex(t,
 		"f195d8bec10ed1dbd57b5fa240bda1b8"+
 			"85eee733f6a13e5df33ce4b33c45dee4"+
@@ -186,9 +185,11 @@ func TestCTRACPKM_Kuznyechik_Master768(t *testing.T) {
 }
 
 // Magma single ACPKM transform in isolation (K -> K2), ctr-acpkm.md §"Magma
-// ACPKM key-meshing KAT (K2)". We exercise the transform by encrypting one
-// section under K, then forcing exactly one rekey and checking the keystream
-// under K2 matches a plain CTR seeded with K2 at the advanced counter.
+// ACPKM key-meshing KAT (K2)". This test verifies the ACPKM transform
+// directly: it computes ACPKM(K) = E_K(D[0:8])||E_K(D[8:16])||E_K(D[16:24])||E_K(D[24:32])
+// using magma.NewCipher directly, and checks the result equals the known K2.
+// It does NOT invoke the ctracpkm package's rekey path; the end-to-end Magma
+// CTR-ACPKM keystream is pinned by TestCTRACPKM_Magma_OfficialA1 below.
 func TestACPKM_Magma_K2(t *testing.T) {
 	t.Parallel()
 
@@ -286,6 +287,57 @@ func TestCTR_CounterIncrement(t *testing.T) {
 
 	if !bytes.Equal(gammaBlock2, out2) {
 		t.Fatalf("counter increment mismatch:\n block2 %x\n freshIV+1 %x", gammaBlock2, out2)
+	}
+}
+
+// TestCTRACPKM_Magma_OfficialA1 ports the official Magma CTR-ACPKM end-to-end
+// vector from R 1323565.1.017-2018 Appendix A.1 (the package's own
+// ctracpkm/rfc/R1323565.1.017-2018.pdf, pp. 7-8). This is the only external
+// anchor for the Magma ACPKM rekey path (bs=8, N=16, 3 rekeys over 56 bytes).
+// The ciphertext was verified empirically against the implementation on
+// 2026-06-10 and matches the standard byte-for-byte (confirmed by the audit
+// verifier in finding CTRA-01).
+//
+// N=16 forces a rekey every 16 bytes (every 2 Magma blocks). Over 56 bytes
+// there are 3 rekeys (before bytes 17, 33, 49), using section keys K2, K3, K4.
+func TestCTRACPKM_Magma_OfficialA1(t *testing.T) {
+	t.Parallel()
+
+	// R 1323565.1.017-2018 Appendix A.1, p. 7.
+	key := mustHex(t, "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
+	// IV is the 4-byte nonce 12345678 zero-padded to the 8-byte Magma counter.
+	iv := mustHex(t, "1234567800000000")
+	// 56-byte plaintext from the standard.
+	plain := mustHex(t,
+		"1122334455667700ffeeddccbbaa9988"+
+			"00112233445566778899aabbcceeff0a"+
+			"112233445566778899aabbcceeff0a00"+
+			"2233445566778899")
+	// Expected 56-byte ciphertext from R 1323565.1.017-2018 A.1.
+	want := mustHex(t,
+		"2ab81deeeb1e4cab68e104c4bd6b94ea"+
+			"c72c67af6c2e5b6b0eafb61770f1b32e"+
+			"a1ae71149eed1382abd467180672ec6f"+
+			"84a2f15b3fca72c1")
+
+	got := make([]byte, len(plain))
+	ctracpkm.NewCTRACPKM(newMagma, key, iv, 16).XORKeyStream(got, plain)
+
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Magma CTR-ACPKM A.1 (one-shot):\n got  %x\n want %x", got, want)
+	}
+
+	// Split-write variant: split at offsets crossing the N=16 section boundary.
+	// Splits at 7, 16, 33, 50 cross both intra-block and section boundaries.
+	got2 := make([]byte, len(plain))
+	s := ctracpkm.NewCTRACPKM(newMagma, key, iv, 16)
+
+	for _, chunk := range [][2]int{{0, 7}, {7, 16}, {16, 33}, {33, 50}, {50, 56}} {
+		s.XORKeyStream(got2[chunk[0]:chunk[1]], plain[chunk[0]:chunk[1]])
+	}
+
+	if !bytes.Equal(got2, want) {
+		t.Fatalf("Magma CTR-ACPKM A.1 (split-write):\n got  %x\n want %x", got2, want)
 	}
 }
 

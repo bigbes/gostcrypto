@@ -21,9 +21,9 @@ func mustHex(t *testing.T, s string) []byte {
 // TestKAT_MultiSeq pins window-crossing TLSTree leaves for both cipher suites
 // against gost-engine 3.0.3's gost_tlstree(): kuznyechik-cbc (NID 1015) and
 // magma-cbc (NID 1190), K_root = 32×0xFF. These seqs straddle the level-3 and
-// level-2 window boundaries, where the per-suite TLSTREE constants (RFC 9367)
-// differ — so they exercise key paths the seq=63 leaf (level seeds all zero)
-// cannot. Re-derived via dlopen(gost.dylib)+gost_tlstree.
+// level-2 window boundaries, where the per-suite TLSTREE constants (RFC 9189
+// §8.1.1, Table 3) differ — so they exercise key paths the seq=63 leaf (level
+// seeds all zero) cannot. Re-derived via dlopen(gost.dylib)+gost_tlstree.
 func TestKAT_MultiSeq(t *testing.T) {
 	t.Parallel()
 

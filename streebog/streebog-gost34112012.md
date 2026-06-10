@@ -12,33 +12,33 @@ write Streebog in Go from this text plus RFC 6986, **without reading gogost**.
 
 ## Status
 
-`statusKind = gogost-backed`. The repo currently calls
-`go.stargrave.org/gogost/v7/gost34112012256` and `.../gost34112012512`
-(GPL-3.0, vendored under `third_party/gogost`). The wrappers are:
+**Clean-room implementation, complete.** `streebog/streebog.go` is a
+BSD-2-Clause, zero-dependency Go implementation. The module has no dependency on
+`go.stargrave.org/gogost` or any GPL code. The facade entry points are:
 
-- `internal/gost/primitives_gost.go:144` — `Streebog256(msg) []byte` (one-shot).
-- `internal/gost/primitives_gost.go:151` — `Streebog512(msg) []byte` (one-shot).
-- `internal/gost/exports_gost.go:40` — `NewStreebog256Hash() hash.Hash`.
-- `internal/gost/exports_gost.go:43` — `NewStreebog512Hash() hash.Hash`.
+- `primitives.go:124` — `Streebog256(msg []byte) []byte` (one-shot).
+- `primitives.go` — `Streebog512(msg []byte) []byte` (one-shot).
+- `exports.go:68` — `NewStreebog256Hash() hash.Hash`.
+- `exports.go` — `NewStreebog512Hash() hash.Hash`.
 
-These are the *only* call surface the rest of the tree sees; a GPL-free
-reimplementation only has to satisfy `hash.Hash` behind these four functions.
+Tests live in `streebog/streebog_test.go`. Differential parity tests against the
+gogost reference are quarantined (BSD/GPL boundary) in
+`../gostcrypto-compat/parity/streebog/streebog_parity_test.go` — no build tags
+needed there; run with `( cd ../gostcrypto-compat && go test ./parity/streebog/ )`.
 
-### Where the repo uses Streebog
+### Where this module uses Streebog
 
-- **TLS PRF** for the GOST 2012 suites (`Kx=GOST`, RFC 9189 / RFC 9367).
-  `tls/internal/suites/gost_suites.go:151` defines `specPRFStreebog256`
-  (`Hash: gost.NewStreebog256Hash`), wired into the suites at lines 197, 220,
-  235, 250. The PRF runs over **HMAC-Streebog-256**, so Streebog must satisfy
-  `hash.Hash` correctly under `crypto/hmac` (block size 64, streaming `Write`).
-- **RFC 9367 / 2018 key exchange UKM**: `tls/internal/ke/gost2018.go:161`
-  computes `gost.Streebog256(clientRandom || serverRandom)` (64-byte input →
-  32-byte digest) to derive the UKM.
+- **TLS PRF** for the GOST 2012 suites (RFC 9189): consumed by `gostls` via
+  `HMAC-Streebog-256`, so Streebog must satisfy `hash.Hash` correctly under
+  `crypto/hmac` (block size 64, streaming `Write`).
+- **Key exchange UKM** (RFC 9189 / RFC 9367): `Streebog256(clientRandom ||
+  serverRandom)` (64-byte input → 32-byte digest) to derive the UKM. Call site
+  in `github.com/bigbes/gostls`.
 - **X.509 GOST certificate signature verification**:
-  `x509gost/verify.go:185` selects `NewStreebog256Hash()` for
-  `id-tc26-gost3410-12-256` signatures and `verify.go:188`
-  `NewStreebog512Hash()` for `id-tc26-gost3410-12-512`. The TBS bytes are
-  hashed before the GOST R 34.10-2012 signature check.
+  `x509gost/verify.go` selects `NewStreebog256Hash()` for
+  `id-tc26-gost3410-12-256` signatures and `NewStreebog512Hash()` for
+  `id-tc26-gost3410-12-512`. The TBS bytes are hashed before the
+  GOST R 34.10-2012 signature check.
 - **OIDs** (`x509gost/oids.go:53,57`):
   Streebog-256 = `1.2.643.7.1.1.2.2`, Streebog-512 = `1.2.643.7.1.1.2.3`.
 
@@ -344,203 +344,48 @@ Each step is independently testable.
    `h[0:64]`. Verify both digests of every inline vector.
 8. **Carry vector.** Run the 128-byte carry-stress vector; a mismatch here but
    passes on M1 means a `Σ`/`N` carry bug (delta D3).
-9. **HMAC / streaming.** Wrap as `hash.Hash`, run under `crypto/hmac`, and
-   match `TestGost_HMACStreebog512_EngineVectors`
-   (`internal/gost/engine_hash_vectors_test.go:362`). Confirm chunked `Write`
-   (e.g. 1 byte at a time) yields identical digests to one-shot (delta D5).
+9. **HMAC / streaming.** Wrap as `hash.Hash`, run under `crypto/hmac`. Confirm
+   chunked `Write` (e.g. 1 byte at a time) yields identical digests to one-shot
+   (delta D5). The HMAC path is exercised transitively by `kdftree` and
+   `tlstree` KATs in sibling packages; in-package coverage is in
+   `streebog/streebog_test.go` (see `TestStreaming`, `TestSumNonDestructive`).
 10. **Drop-in.** Provide `Streebog256/512(msg)` and `NewStreebog256/512Hash()`
-    matching `internal/gost/primitives_gost.go:144,151` and
-    `exports_gost.go:40,43`; rerun the full
-    `internal/gost/engine_hash_vectors_test.go` suite under `-tags gost`.
+    in the facade (`exports.go`, `primitives.go`). Parity against the gogost
+    reference is proved by `../gostcrypto-compat/parity/streebog/` — run with
+    `( cd ../gostcrypto-compat && go test ./parity/streebog/ )` (no build tags).
 
 ## Conformance & fuzz testing
 
-Drop-in scaffolding for proving a clean-room Streebog matches the references.
 Streebog is a *pure function* (`[]byte msg → []byte digest`), so differential
 testing is simple: hash the **same** message with the clean-room impl and with
-each reference, and assert byte-for-byte equality. Two reference targets exist
-and both are real Go APIs (no CLI oracle needed): the raw gogost packages
-`gost34112012256`/`gost34112012512` (`.New()` → `hash.Hash`, `exports_gost.go:40,43`)
-and the local one-shot wrappers `internal/gost.Streebog256`/`Streebog512`
-(`primitives_gost.go:144,151`) — the latter is just gogost under the hood today,
-but pinning *both* catches a wrapper regression (e.g. a wrong truncation or a
-swapped 256/512 New). The fuzzer drives arbitrary-length messages through 256
-and 512 in one harness.
+the reference, and assert byte-for-byte equality.
 
-Both blocks below are `//go:build gost` (the references are gated). Replace the
-`mynew` alias with your clean-room package.
+### In-module tests
 
-### KAT conformance — seeded with this doc's pinned vectors
+The clean-room tests live in `streebog/streebog_test.go` (no build tags):
 
-```go
-//go:build gost
-
-package mynew_test
-
-import (
-	"encoding/hex"
-	"testing"
-
-	"go.stargrave.org/gogost/v7/gost34112012256"
-	"go.stargrave.org/gogost/v7/gost34112012512"
-
-	gost "go.bigb.es/tlsdialer/internal/gost" // local one-shot wrappers
-	mynew "example.com/yourpkg/streebog"        // clean-room impl under test
-)
-
-// gogostSum hashes msg with the raw gogost reference for the given size.
-func gogostSum(t *testing.T, size int, msg []byte) []byte {
-	t.Helper()
-	var h interface {
-		Write([]byte) (int, error)
-		Sum([]byte) []byte
-	}
-	switch size {
-	case 32:
-		h = gost34112012256.New()
-	case 64:
-		h = gost34112012512.New()
-	default:
-		t.Fatalf("bad size %d", size)
-	}
-	h.Write(msg)
-	return h.Sum(nil)
-}
-
-func TestStreebogConformance(t *testing.T) {
-	mustHex := func(s string) []byte {
-		b, err := hex.DecodeString(s)
-		if err != nil {
-			t.Fatalf("bad hex %q: %v", s, err)
-		}
-		return b
-	}
-	// Inputs and pinned outputs are the exact vectors from
-	// streebog-gost34112012.md "Inline, runnable vectors".
-	m1 := []byte("012345678901234567890123456789012345678901234567890123456789012")
-	carry := func() []byte {
-		b := make([]byte, 0, 128)
-		for i := 0; i < 64; i++ {
-			b = append(b, 0xee)
-		}
-		b = append(b, 0x16)
-		for i := 0; i < 62; i++ {
-			b = append(b, 0x11)
-		}
-		return append(b, 0x16)
-	}()
-
-	cases := []struct {
-		name      string
-		size      int
-		in        []byte
-		wantDigest string
-	}{
-		{"M1/256", 32, m1, "9d151eefd8590b89daa6ba6cb74af9275dd051026bb149a452fd84e5e57b5500"},
-		{"M1/512", 64, m1, "1b54d01a4af5b9d5cc3d86d68d285462b19abc2475222f35c085122be4ba1ffa00ad30f8767b3a82384c6574f024c311e2a481332b08ef7f41797891c1646f48"},
-		{"empty/256", 32, nil, "3f539a213e97c802cc229d474c6aa32a825a360b2a933a949fd925208d9ce1bb"},
-		{"empty/512", 64, nil, "8e945da209aa869f0455928529bcae4679e9873ab707b55315f56ceb98bef0a7362f715528356ee83cda5f2aac4c6ad2ba3a715c1bcd81cb8e9f90bf4c1c1a8a"},
-		{"carry/256", 32, carry, "81bb632fa31fcc38b4c379a662dbc58b9bed83f50d3a1b2ce7271ab02d25babb"},
-		{"carry/512", 64, carry, "8b06f41e59907d9636e892caf5942fcdfb71fa31169a5e70f0edb873664df41c2cce6e06dc6755d15a61cdeb92bd607cc4aaca6732bf3568a23a210dd520fd41"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			want := mustHex(tc.wantDigest)
-
-			var mine []byte
-			switch tc.size {
-			case 32:
-				mine = mynew.Streebog256(tc.in)
-			case 64:
-				mine = mynew.Streebog512(tc.in)
-			}
-			if string(mine) != string(want) {
-				t.Fatalf("clean-room: got %x want %x", mine, want)
-			}
-
-			// Reference 1: raw gogost.
-			if ref := gogostSum(t, tc.size, tc.in); string(ref) != string(want) {
-				t.Fatalf("gogost ref: got %x want %x", ref, want)
-			}
-
-			// Reference 2: local wrapper (catches truncation/size-swap regressions).
-			var loc []byte
-			switch tc.size {
-			case 32:
-				loc = gost.Streebog256(tc.in)
-			case 64:
-				loc = gost.Streebog512(tc.in)
-			}
-			if string(loc) != string(want) {
-				t.Fatalf("internal/gost ref: got %x want %x", loc, want)
-			}
-		})
-	}
-}
-```
-
-### Fuzz conformance — arbitrary-length messages, 256 and 512
-
-The randomized input is already a message, so no normalization is needed beyond
-running the *same* `data` through every target. Each fuzz iteration hashes once
-per size and diffs the clean-room impl against both references.
-
-```go
-//go:build gost
-
-package mynew_test
-
-import (
-	"bytes"
-	"testing"
-
-	gost "go.bigb.es/tlsdialer/internal/gost"
-	mynew "example.com/yourpkg/streebog"
-)
-
-func FuzzStreebogConformance(f *testing.F) {
-	// Seed the corpus from the KAT inputs.
-	f.Add([]byte(nil))
-	f.Add([]byte("012345678901234567890123456789012345678901234567890123456789012"))
-	f.Add(bytes.Repeat([]byte{0xee}, 64)) // exercises a full-block boundary
-	f.Add(bytes.Repeat([]byte{0x00}, 65)) // one byte past a block
-
-	f.Fuzz(func(t *testing.T, msg []byte) {
-		// 256-bit.
-		mine256 := mynew.Streebog256(msg)
-		if ref := gost.Streebog256(msg); !bytes.Equal(mine256, ref) {
-			t.Fatalf("256 mismatch: msg=%x\n clean-room %x\n reference  %x", msg, mine256, ref)
-		}
-		if len(mine256) != 32 {
-			t.Fatalf("256 wrong length %d", len(mine256))
-		}
-
-		// 512-bit.
-		mine512 := mynew.Streebog512(msg)
-		if ref := gost.Streebog512(msg); !bytes.Equal(mine512, ref) {
-			t.Fatalf("512 mismatch: msg=%x\n clean-room %x\n reference  %x", msg, mine512, ref)
-		}
-		if len(mine512) != 64 {
-			t.Fatalf("512 wrong length %d", len(mine512))
-		}
-	})
-}
-```
-
-`internal/gost.Streebog256/512` resolve to gogost in the current tree, so a
-single reference call here covers both targets; expand to the explicit
-`gost34112012256.New()` path (as in the KAT helper) if you want the raw-gogost
-diff in the fuzz loop too. No CLI oracle is needed — unlike OMAC / CTR-ACPKM /
-KEG / KExp15 / KeyWrap, Streebog has a first-class gogost API, so the references
-are plain Go calls rather than a shell-out to the gost-engine `openssl dgst`
-command in `CLAUDE.md`.
-
-### Run commands
+- `TestKAT*` — RFC 6986 §10 / gost-engine vectors (M1, empty, carry128) for
+  both 256 and 512.
+- `TestStreaming` — chunked writes at sizes {1,3,7,31,63,64,65,127,128} over a
+  1050-byte message; result must match one-shot `Sum256`/`Sum512`.
+- `TestSumNonDestructive` — calling `Sum` twice on the same digest object
+  returns identical output.
 
 ```sh
-go test -tags gost -run TestStreebogConformance ./yourpkg/
-go test -tags gost -fuzz=FuzzStreebogConformance -fuzztime=30s ./yourpkg/
+CGO_ENABLED=0 go test ./streebog/
+```
+
+### Differential parity (gogost reference)
+
+The gogost library (GPL-3.0) is quarantined in `../gostcrypto-compat`. The
+differential parity test is at
+`../gostcrypto-compat/parity/streebog/streebog_parity_test.go`. It covers
+arbitrary-length messages for both 256 and 512, including a fuzz target
+`FuzzDiffAgainstGost`. No build tags are needed:
+
+```sh
+( cd ../gostcrypto-compat && go test ./parity/streebog/ )
+( cd ../gostcrypto-compat && go test -fuzz=FuzzDiffAgainstGost -fuzztime=30s ./parity/streebog/ )
 ```
 
 ## References

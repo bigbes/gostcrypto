@@ -4,8 +4,9 @@
 //
 // This is a clean-room implementation built strictly from
 // kdftree2012-256.md and the cited RFCs. It reuses the
-// sibling clean-room Streebog-256 hash (cleanroom/streebog) and the standard
-// library crypto/hmac. It contains no GOST-licensed code and no build tags.
+// sibling clean-room Streebog-256 hash (github.com/bigbes/gostcrypto/streebog)
+// and the standard library crypto/hmac. It contains no GOST-licensed code and
+// no build tags.
 //
 // # References
 //

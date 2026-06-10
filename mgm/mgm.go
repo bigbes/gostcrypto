@@ -16,6 +16,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+	"math/bits"
 )
 
 const (
@@ -44,13 +45,14 @@ const (
 	// byteBitMask masks a bit index within a byte (bit % 8).
 	byteBitMask = 7
 
-	// maxFieldShiftBits is the largest n/2-3 shift that still fits a positive
-	// platform int (63 == bit width of a signed 64-bit int).
-	maxFieldShiftBits = 63
-
 	// lengthFieldShiftAdj is the -3 in 2^(n/2-3)-1: a field's BIT length is
 	// stored in n/2 bits, so its BYTE length caps at 2^(n/2-3)-1.
 	lengthFieldShiftAdj = 3
+
+	// uint64Bits is the number of bits in a uint64 value. When halfBits (n/2)
+	// reaches this value 2^n/2 would overflow uint64, so the combined-length
+	// bound is always satisfied by the uint64-overflow check alone.
+	uint64Bits = 64
 )
 
 // errBlockSize and errTagSize are the static construction errors returned by
@@ -72,7 +74,7 @@ type MGM struct {
 	reduction byte
 
 	// scratch.
-	icn  []byte // working ICN with domain bit applied.
+	icn  []byte // raw nonce copy; domain bit is applied to the m.ek copy inside crypt/auth.
 	yi   []byte // encryption counter.
 	zi   []byte // MAC counter.
 	ek   []byte // E_K output buffer.
@@ -141,6 +143,12 @@ func (m *MGM) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 		panic("mgm: field too large for the n/2-bit length block under one nonce")
 	}
 
+	// RFC 9058 §4.1 (rfc/rfc9058.txt:281-282): the combined bit-length MUST
+	// satisfy 0 < |A| + |P| < 2^(n/2).
+	if !m.validateLens(len(additionalData), len(plaintext)) {
+		panic("mgm: combined length of additional data and plaintext exceeds 2^(n/2) bits")
+	}
+
 	copy(m.icn, nonce)
 
 	ret, out := sliceForAppend(dst, len(plaintext)+m.tagSize)
@@ -175,6 +183,12 @@ func (m *MGM) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error
 		return nil, errOpen
 	}
 
+	// RFC 9058 §4.2 (rfc/rfc9058.txt:355-356): the combined bit-length MUST
+	// satisfy 0 < |A| + |C| < 2^(n/2).
+	if !m.validateLens(len(additionalData), len(ct)) {
+		return nil, errOpen
+	}
+
 	copy(m.icn, nonce)
 
 	expTag := make([]byte, m.tagSize)
@@ -196,17 +210,47 @@ func (m *MGM) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error
 // most (2^(n/2)-1)/8 = 2^(n/2-3)-1 bytes. For the Magma case (n=64) that is
 // only 2^29-1 (512 MiB); exceeding it would silently truncate the length block
 // (len*8 stored as uint32) and forge a wrong tag, so Seal/Open reject it. The
-// cap is applied to EACH field, not their sum.
+// cap is applied to EACH field; see also validateLens for the combined-sum check.
+//
+// On 32-bit platforms the Kuznyechik shift (n/2-3 = 61) does not fit a platform
+// int, so we return maxInt (the practical limit for any in-memory buffer) in that
+// case. We detect this by comparing the shift amount against bits.UintSize-1.
 func (m *MGM) maxFieldLen() int {
 	const maxInt = int(^uint(0) >> 1)
 
-	bits := m.blockSize * bitsPerByte / halfDivisor // n/2 bits per length field.
+	halfBits := m.blockSize * bitsPerByte / halfDivisor // n/2 bits per length field.
+	shift := halfBits - lengthFieldShiftAdj             // n/2 - 3.
 
-	if bits-lengthFieldShiftAdj >= maxFieldShiftBits {
+	if shift >= bits.UintSize-1 {
+		// The shift would not fit a signed platform int; cap is effectively ∞.
 		return maxInt
 	}
 
-	return (1 << uint(bits-lengthFieldShiftAdj)) - 1
+	return (1 << uint(shift)) - 1
+}
+
+// validateLens checks the RFC 9058 combined-length MUST:
+// |A| + |P| < 2^(n/2) bits (rfc/rfc9058.txt:281-282).
+// Arithmetic is done in uint64 to avoid overflow on 32-bit platforms.
+// Returns true if the combined bit-length is within bounds.
+func (m *MGM) validateLens(aLen, pLen int) bool {
+	halfBits := uint64(m.blockSize) * bitsPerByte / halfDivisor // n/2.
+	aBits := uint64(aLen) * bitsPerByte
+	pBits := uint64(pLen) * bitsPerByte
+
+	sum := aBits + pBits
+	// Check for uint64 overflow (sum wraps); also check against the bound.
+	// 2^(n/2) bits: for n=64 that is 2^32; for n=128 that is 2^64 (overflows uint64 → 0).
+	if aBits > sum { // overflow.
+		return false
+	}
+
+	if halfBits >= uint64Bits {
+		// 2^64 doesn't fit uint64; the only invalid case is overflow (already checked).
+		return true
+	}
+
+	return sum < (uint64(1) << halfBits)
 }
 
 // incrR increments the right (low) half of a in-place, big-endian, carry

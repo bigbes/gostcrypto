@@ -8,7 +8,7 @@ import (
 	gost3410curves "github.com/bigbes/gostcrypto/gost3410curves"
 )
 
-// allOIDs lists the eleven supported OID arcs and their expected PointSize.
+// allOIDs lists the ten supported OID arcs and their expected PointSize.
 var allOIDs = []struct {
 	oid       string
 	name      string
@@ -229,6 +229,197 @@ func TestGroupLaws(t *testing.T) {
 	if !c.IsOnCurve(twoG) {
 		t.Fatal("2G not on curve")
 	}
+}
+
+// TestCofactorField pins the Cofactor value for every registered OID.
+// Cofactor 4 applies only to tc26-256-A and tc26-512-C (twisted-Edwards derived);
+// all other registered sets have Cofactor 1.
+func TestCofactorField(t *testing.T) {
+	t.Parallel()
+
+	want := map[string]int{
+		"1.2.643.2.2.35.1":    1, // CryptoPro-A.
+		"1.2.643.2.2.35.2":    1, // CryptoPro-B.
+		"1.2.643.2.2.35.3":    1, // CryptoPro-C (NOT 4 — see VKO-63 finding).
+		"1.2.643.7.1.2.1.1.1": 4, // tc26-256-A (twisted-Edwards, co=4).
+		"1.2.643.7.1.2.1.1.2": 1, // tc26-256-B == CryptoPro-A.
+		"1.2.643.7.1.2.1.1.3": 1, // tc26-256-C == CryptoPro-B.
+		"1.2.643.7.1.2.1.1.4": 1, // tc26-256-D == CryptoPro-C.
+		"1.2.643.7.1.2.1.2.1": 1, // tc26-512-A.
+		"1.2.643.7.1.2.1.2.2": 1, // tc26-512-B.
+		"1.2.643.7.1.2.1.2.3": 4, // tc26-512-C (twisted-Edwards, co=4).
+	}
+	for oid, wantCof := range want {
+		c := mustCurve(t, oid)
+		if c.Cofactor != wantCof {
+			t.Errorf("OID %s: Cofactor=%d want %d", oid, c.Cofactor, wantCof)
+		}
+	}
+}
+
+// TestIsOnCurve_Rejects pins the IsOnCurve rejection paths.
+// A regression deleting the range check or inverting the equation check
+// would pass all positive-only tests but fail these.
+func TestIsOnCurve_Rejects(t *testing.T) {
+	t.Parallel()
+
+	// Use tc26-256-A; the same logic applies to all curves.
+	c := mustCurve(t, "1.2.643.7.1.2.1.1.1")
+	G := c.Base()
+
+	cases := []struct {
+		name string
+		p    gost3410curves.Point
+		want bool
+	}{
+		// Positive: base point must be on curve.
+		{"G on curve", G, true},
+		// Negative: Y+1 takes the point off the curve.
+		{"(G.X, G.Y+1)", gost3410curves.Point{
+			X: new(big.Int).Set(G.X),
+			Y: new(big.Int).Add(G.Y, big.NewInt(1)),
+		}, false},
+		// Negative: coordinates congruent-mod-P but unreduced (G.X+P, G.Y+P).
+		{"(G.X+P, G.Y+P) unreduced", gost3410curves.Point{
+			X: new(big.Int).Add(G.X, c.P),
+			Y: new(big.Int).Add(G.Y, c.P),
+		}, false},
+		// Negative: negative coordinates must be rejected by the range check.
+		{"(-1, G.Y) negative X", gost3410curves.Point{
+			X: big.NewInt(-1),
+			Y: new(big.Int).Set(G.Y),
+		}, false},
+		// Positive: the identity (infinity) is considered on the curve.
+		{"infinity", gost3410curves.Point{}, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := c.IsOnCurve(tc.p)
+			if got != tc.want {
+				t.Fatalf("IsOnCurve = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIdentityEdgePaths pins identity and guard paths of Add, Double, ScalarMult.
+func TestIdentityEdgePaths(t *testing.T) {
+	t.Parallel()
+
+	c := mustCurve(t, "1.2.643.7.1.2.1.1.1") // tc26-256-A.
+	G := c.Base()
+	inf := gost3410curves.Point{} // identity.
+
+	t.Run("Add(inf,G)==G", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.Add(inf, G)
+		if r.X.Cmp(G.X) != 0 || r.Y.Cmp(G.Y) != 0 {
+			t.Fatalf("Add(∞,G) = (%x,%x), want G", r.X, r.Y)
+		}
+	})
+
+	t.Run("Add(G,inf)==G", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.Add(G, inf)
+		if r.X.Cmp(G.X) != 0 || r.Y.Cmp(G.Y) != 0 {
+			t.Fatalf("Add(G,∞) = (%x,%x), want G", r.X, r.Y)
+		}
+	})
+
+	// Verify Add returns a clone, not a reference, so mutation is safe.
+	t.Run("Add(inf,G)_clone", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.Add(inf, G)
+		origX := new(big.Int).Set(r.X)
+		r.X.Add(r.X, big.NewInt(1)) // mutate result.
+		// G.X must be unchanged.
+		if G.X.Cmp(origX) != 0 {
+			t.Fatal("Add returned a reference, not a clone: mutating result changed G")
+		}
+	})
+
+	t.Run("Add(G,-G)==inf", func(t *testing.T) {
+		t.Parallel()
+
+		negG := gost3410curves.Point{
+			X: new(big.Int).Set(G.X),
+			Y: new(big.Int).Sub(c.P, G.Y),
+		}
+
+		r := c.Add(G, negG)
+		if !r.IsInfinity() {
+			t.Fatalf("Add(G,-G) = (%x,%x), want ∞", r.X, r.Y)
+		}
+	})
+
+	t.Run("Double(inf)==inf", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.Double(inf)
+		if !r.IsInfinity() {
+			t.Fatalf("Double(∞) = (%x,%x), want ∞", r.X, r.Y)
+		}
+	})
+
+	t.Run("ScalarMult(nil,G)==inf", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.ScalarMult(nil, G)
+		if !r.IsInfinity() {
+			t.Fatalf("ScalarMult(nil,G) = (%x,%x), want ∞", r.X, r.Y)
+		}
+	})
+
+	t.Run("ScalarMult(0,G)==inf", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.ScalarMult(big.NewInt(0), G)
+		if !r.IsInfinity() {
+			t.Fatalf("ScalarMult(0,G) = (%x,%x), want ∞", r.X, r.Y)
+		}
+	})
+
+	t.Run("ScalarMult(-1,G)==inf", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.ScalarMult(big.NewInt(-1), G)
+		if !r.IsInfinity() {
+			t.Fatalf("ScalarMult(-1,G) = (%x,%x), want ∞", r.X, r.Y)
+		}
+	})
+
+	t.Run("ScalarMult(1,G)==G", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.ScalarMult(big.NewInt(1), G)
+		if r.X.Cmp(G.X) != 0 || r.Y.Cmp(G.Y) != 0 {
+			t.Fatalf("ScalarMult(1,G) = (%x,%x), want G", r.X, r.Y)
+		}
+	})
+
+	t.Run("ScalarMult(Q,G)==inf", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.ScalarMult(c.Q, G)
+		if !r.IsInfinity() {
+			t.Fatalf("ScalarMult(Q,G) = (%x,%x), want ∞", r.X, r.Y)
+		}
+	})
+
+	t.Run("ScalarMult(k,inf)==inf", func(t *testing.T) {
+		t.Parallel()
+
+		r := c.ScalarMult(big.NewInt(7), inf)
+		if !r.IsInfinity() {
+			t.Fatalf("ScalarMult(7,∞) = (%x,%x), want ∞", r.X, r.Y)
+		}
+	})
 }
 
 // aliasing: the 2001 CryptoPro 256-bit sets share constants with tc26-256-B/C/D.

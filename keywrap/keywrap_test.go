@@ -96,8 +96,11 @@ func TestKeyWrapCryptoPro_BadSizes(t *testing.T) {
 		kek, ukm, sess []byte
 	}{
 		{"short kek", make([]byte, 31), good8, good32},
+		{"long kek", make([]byte, 33), good8, good32},
 		{"short ukm", good32, make([]byte, 7), good32},
-		{"short session", good32, good8, make([]byte, 33)},
+		{"long ukm", good32, make([]byte, 9), good32},
+		{"short session", good32, good8, make([]byte, 31)},
+		{"long session", good32, good8, make([]byte, 33)},
 	}
 
 	for _, tc := range cases {
@@ -107,6 +110,47 @@ func TestKeyWrapCryptoPro_BadSizes(t *testing.T) {
 			if _, err := KeyWrapCryptoPro(SboxTC26Z, tc.kek, tc.ukm, tc.sess); err == nil {
 				t.Fatal("expected error, got nil")
 			}
+		})
+	}
+}
+
+// TestDiversify_PanicOnBadSizes guards that Diversify panics cleanly on
+// wrong-length inputs (KEYW-41). A 16-byte kek previously caused silent
+// zero-padding; a 7-byte ukm previously caused a raw index panic.
+func TestDiversify_PanicOnBadSizes(t *testing.T) {
+	t.Parallel()
+
+	good32 := make([]byte, 32)
+	good8 := make([]byte, 8)
+
+	cases := []struct {
+		name    string
+		kek     []byte
+		ukm     []byte
+		wantMsg string
+	}{
+		{"short kek", make([]byte, 16), good8, "keywrap: kek must be 32 bytes"},
+		{"long kek", make([]byte, 33), good8, "keywrap: kek must be 32 bytes"},
+		{"short ukm", good32, make([]byte, 7), "keywrap: ukm must be 8 bytes"},
+		{"long ukm", good32, make([]byte, 9), "keywrap: ukm must be 8 bytes"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("expected panic, got none")
+				}
+
+				if got, ok := r.(string); !ok || got != tc.wantMsg {
+					t.Fatalf("panic message: got %q, want %q", r, tc.wantMsg)
+				}
+			}()
+
+			Diversify(SboxTC26Z, tc.kek, tc.ukm)
 		})
 	}
 }

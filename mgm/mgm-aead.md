@@ -21,22 +21,17 @@ MGM is defined for both GOST block sizes:
 
 ### Where this repo uses it
 
-MGM is **not wired into any TLS suite, OID, or handshake path today**. Grep
-confirms the only references are the test and the vendored library:
+MGM is **not wired into any TLS suite, OID, or handshake path today**.
+The clean-room implementation lives in `mgm/mgm.go`; tests are in
+`mgm/mgm_test.go` and `mgm/mgm_internal_test.go`. Differential parity
+tests live in `../gostcrypto-compat/parity/mgm/` (GPL-quarantined).
 
-- `internal/gost/mgm_test.go` — ports the two R 1323565.1.026-2019 KATs
-  (Kuznyechik + Magma) directly against `go.stargrave.org/gogost/v7/mgm`.
-- `third_party/gogost/mgm/` — the vendored gogost implementation (GPL-3.0).
-
-There is no `internal/gost` wrapper around MGM (no `mgm_gost.go`); the test
-imports gogost's `mgm`, `gost3412128`, and `gost341264` packages directly.
 The TLS GOST AEAD path in production is MGM's cousin Kuznyechik/Magma-CTR-ACPKM
-+ OMAC (RFC 9367 suites `0xC100`/`0xC101`), not MGM. This document exists so
-MGM can be reimplemented BSD-clean if a future suite needs it, without ever
-reading gogost.
++ OMAC (RFC 9189 suites `0xC100`/`0xC101`), not MGM. This document exists so
+MGM can be used if a future suite needs it.
 
-**statusKind: gogost-backed** — the repo currently calls gogost for this
-primitive; `internal/gost` does not yet reimplement it.
+**statusKind: clean-room** — `mgm/mgm.go` is the in-repo implementation,
+BSD-2-Clause, zero third-party dependencies.
 
 ---
 
@@ -54,21 +49,28 @@ tag length `S` bits.
 | Key size             | 32 bytes           | 32 bytes     |
 | Nonce / ICN size     | 16 bytes           | 8 bytes      |
 | Tag size `S` (bytes) | 4 … 16             | 4 … 8        |
-| Max data per nonce   | `2^(n/2) − 1` bytes | same        |
+| Max data per **field** | `2^(n/2-3) − 1` bytes | same    |
+| Combined bound (RFC §4.1) | `\|A\| + \|P\| < 2^(n/2)` bits | same |
 
-Tag-size bound (RFC 9058 §4: `32 ≤ S ≤ n` bits): in this repo's gogost build it
-is enforced as bytes in `NewMGM` — `tagSize < 4 || tagSize > blockSize` is an
-error (`third_party/gogost/mgm/mode.go:52-54`). The maximum data length per nonce
-is `MaxSize = 2^(n/2) − 1` bytes (`mode.go:56`), matching the engine's
-`< 2^(bl*4-3)` byte cap (`tmp/engine/gost_gost2015.c:261,330`).
+Tag-size bound (RFC 9058 §4: `32 ≤ S ≤ n` bits): enforced as bytes in `NewMGM`
+— `tagSize < 4 || tagSize > blockSize` is an error (`mgm/mgm.go:NewMGM`).
 
-> **Overflow trap.** For `n=128` this bound is `2^64 − 1`, which is **not
-> representable in Go `int`** (max `int` is `2^63 − 1`). gogost stores `MaxSize`
-> as a `uint64` for exactly this reason (`mode.go:42,56`). A reimplementation
-> that types the cap as `int` and writes `(1<<64)-1` literally will not compile /
-> will overflow; cap it at `maxInt` for any half-width ≥ 63 bits (effectively
-> unbounded for in-memory buffers), as `mgm/mgm.go:maxSize` does. The
-> `n=64` bound (`2^32 − 1`) is fine in `int`.
+Per-field length cap: `mgm/mgm.go:maxFieldLen()` returns `2^(n/2-3) − 1` bytes.
+For Magma (n=64): `2^29 − 1` bytes (~512 MiB). Exceeding this would silently
+truncate the length block and forge a wrong tag.
+
+RFC combined bound: `|A| + |P| < 2^(n/2)` bits (rfc/rfc9058.txt:281-282).
+This is enforced by `mgm/mgm.go:validateLens()` in addition to the per-field cap.
+For Magma this rules out two ~512 MiB fields together (sum ≥ 2^32 bits). For
+Kuznyechik the per-field cap (effectively `maxInt`) already implies compliance.
+
+> **32-bit portability note (MGM-51).** On 32-bit platforms (`GOARCH=386/arm`)
+> the Kuznyechik shift `n/2-3 = 61` does not fit a signed `int`. The old code
+> hardcoded `maxFieldShiftBits = 63` (64-bit only), causing `maxFieldLen()` to
+> return `-1` on 32-bit, breaking all Seal/Open calls. The fix compares the
+> shift against `bits.UintSize-1` (`math/bits`) and returns `maxInt` when it
+> would overflow — effectively unbounded for any in-memory buffer.
+> See `mgm/mgm.go:maxFieldLen`.
 
 ### Nonce / ICN constraint (RFC 9058 §3, §4.1)
 

@@ -126,6 +126,11 @@ func (c *Cipher) Decrypt(dst, src []byte) {
 // crypto/cipher.Block so modes (CNT, CTR, OMAC, IMIT) can compose on it.
 func (c *Cipher) BlockSize() int { return BlockSize }
 
+// SBox returns the S-box the cipher was constructed with. Streaming modes
+// (e.g. gost28147cnt) use this to rebuild the cipher during CryptoPro key
+// meshing without needing a separate S-box parameter.
+func (c *Cipher) SBox() SBox { return c.sbox }
+
 // t applies the eight S-boxes nibble-by-nibble (guide §2):
 // t(x) = Σ over i=0..7 of s[i][(x>>4i)&0xF] << 4i.
 func (c *Cipher) t(x uint32) uint32 {

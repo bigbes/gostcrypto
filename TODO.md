@@ -3,7 +3,7 @@
 Open per-package items live next to the code:
 
 - `gost3410sign/TODO.md` — 512-bit sign/verify vector unported
-- `gost28147cnt/TODO.md` — S-box passed twice in `NewCNT`, no consistency check
+- `gost28147cnt/TODO.md` — S-box redundant-parameter issue resolved (GOST-10)
 
 TLS-layer concerns formerly tracked here moved to `../gostls/TODO.md`.
 

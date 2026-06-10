@@ -21,43 +21,26 @@ covers ONLY the block primitive `Encrypt` / `Decrypt`.
 
 ### Status in this repo
 
-**gogost-backed.** The repo currently obtains Kuznyechik from
-`go.stargrave.org/gogost/v7/gost3412128` (GPL-3.0, vendored at
-`third_party/gogost/gost3412128/cipher.go`). There is **no in-repo
-reimplementation** of the block cipher yet — `internal/gost` only wraps gogost.
-This document exists to enable a GPL-free reimplementation.
+**Clean-room, implemented.** Kuznyechik is implemented in this package
+(`kuznyechik.go`) as pure Go, BSD-2-Clause, deriving every constant from RFC 7801
+and the spec below — it imports no GOST backend. `NewCipher(key) *Cipher`
+returns a `crypto/cipher.Block`. Encrypt/Decrypt use fused `S∘L` / `L⁻¹` lookup
+tables built at first use from the verified clean-room transforms; the slow
+bit-loop `gf()`/`r()` path remains in the source as the table generator and the
+documentation of the math. The implementation is table-driven and not
+constant-time — see `SECURITY.md`.
 
-### Where the repo uses it
+### Where this is used
 
-The block cipher itself is reached through two `internal/gost` wrappers:
-
-- `internal/gost/primitives_gost.go:83` `KuznyechikEncrypt(key, plaintext)` and
-  `:92` `KuznyechikDecrypt(key, ciphertext)` — single-block, test-vector entry
-  points. Both call `gost3412128.NewCipher(key)`.
-- `internal/gost/exports_gost.go:72` `NewKuznyechikCipher(key) cipher.Block` —
-  the containment-boundary factory returning a `crypto/cipher.Block`. This is
-  the production entry point; everything below consumes it.
-
-Production call sites that build modes on top of `NewKuznyechikCipher` /
-`gost3412128.NewCipher`:
-
-- `internal/gost/kexp15_gost.go:96-97` — kexp15 key export/import (RFC 9189
-  key transport) builds two Kuznyechik blocks: one for OMAC, one for CTR.
-- `tls/internal/record/protection_ctromac_gost.go:92` — the
-  `NewKuznyechikCTROMACProtector` record protector constructs Kuznyechik
-  blocks via `gost.NewKuznyechikCipher`.
-- `internal/gost/tlstree_gost.go:31` `NewTLSTreeKuznyechikCTROMAC` — TLSTREE
-  key derivation for the CTR-OMAC suite.
-- `tls/internal/ke/gost2018.go:48` — selects the Kuznyechik kexp15 variant.
-
-TLS suite that pulls all of this in:
-
-- **Cipher suite `0xC100`** —
-  `TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC` (RFC 9367 §4.3 / RFC 9189),
-  registered in `tls/internal/suites/gost_suites.go:224-235`
-  (`specKuznyechikCTROMAC`, `specKuznyechikOMAC`). The KDF/PRF for the suite is
-  Streebog-256, **not** Kuznyechik — Kuznyechik is only the bulk cipher and the
-  OMAC block primitive.
+- This package's `Cipher` is consumed directly by the mode packages in this
+  module: `ctracpkm`, `mgm`, `omac`, `kexp15`, `keg` (all `import
+  "github.com/bigbes/gostcrypto/kuznyechik"`), and re-exported through the root
+  `gostcrypto` facade.
+- The pure-Go TLS client (`gostls`, a sibling module) builds the CTR-OMAC record
+  layer on top of these mode packages for cipher suite **`0xC100`**
+  (`TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC`, RFC 9189; see kexp15.go for
+  the RFC attribution). The suite's KDF/PRF is Streebog-256 — Kuznyechik is only
+  the bulk cipher and the OMAC block primitive.
 
 There is **no standalone OID** for the bare block cipher in the TLS path; it is
 identified by the suite ID `0xC100` and the OpenSSL/engine algorithm names
@@ -447,195 +430,41 @@ do not advance until the current vector passes.
 8. **Decrypt.** 9× `(XOR ks[i] → Linv → Sinv)` for i=9..1 then final
    `XOR ks[0]`. Verify it inverts Encrypt and recovers `1122334455667700…`.
 9. **`cipher.Block` wrapper.** `BlockSize()=16`, panic on key length != 32,
-   single-block `Encrypt`/`Decrypt`. Drop it behind a renamed
-   `NewKuznyechikCipher` and re-run the repo's `internal/gost` and
-   `tls/internal/record` Kuznyechik tests under `-tags gost`.
-10. **Mode round-trip (integration).** Once the block passes, confirm the
-    `0xC100` suite still works: `kexp15_gost_test.go`,
-    `protection_ctromac_gost_test.go`, and the live-EE
-    `TestTarantoolEE_Ping_GOST_Pure/GOST2012-KUZNYECHIK-KUZNYECHIKOMAC` row.
+   single-block `Encrypt`/`Decrypt` (`NewCipher` in this package). Re-run the
+   in-package tests (`kuznyechik_test.go`, `guard_test.go`).
+10. **Mode round-trip (integration).** Once the block passes, the mode packages
+    that build on it (`ctracpkm`, `mgm`, `omac`, `kexp15`, `keg`) and the
+    `gostls` CTR-OMAC record layer for suite `0xC100` exercise it end to end.
 
 ---
 
 ## Conformance & fuzz testing
 
-The differential-testing strategy is to run your clean-room block cipher against
-**two** independent oracles on identical inputs and require byte-exact agreement:
-the raw gogost cipher `go.stargrave.org/gogost/v7/gost3412128.NewCipher`
-(reference, GPL-3.0 — used only as a test-time oracle, never linked into the
-clean-room package) and the local `internal/gost.KuznyechikEncrypt`/`Decrypt`
-wrappers (`primitives_gost.go:83`/`:92`, themselves gogost-backed but the actual
-shape your callers will invoke). Both reference targets are pure Go APIs, so no
-gost-engine CLI oracle is needed for the bare block — the CLI is only required
-for the *modes* (OMAC, CTR-ACPKM, KEG, KExp15, KeyWrap) layered on top, which are
-out of scope here. For the randomized fuzz target, generate a random 32-byte key
-and 16-byte block, encrypt with all three impls, assert equality, then assert the
-clean-room `Decrypt(Encrypt(p)) == p` round-trip identity.
+In-package KATs live in `kuznyechik_test.go` (white-box, `package kuznyechik`):
+the primary §A.1 / RFC 7801 §5.5–5.6 vector (`TestPrimaryKAT`), the 4-block ECB
+sequence from GOST R 34.13-2015 §A.1.1 (`TestECB_A11`), per-stage KATs for S, R,
+L, the round constants and the round keys (`TestStageKATs`), the deterministic
+round-trip sweep (`TestRoundTripRandom`), full-overlap aliasing
+(`TestEncryptDecryptInPlace`), key-copy non-retention (`TestNewCipherCopiesKey`),
+and the bad-key panics (`TestNewCipherPanicsOnBadKey`). `guard_test.go` pins the
+short-buffer panics. `BenchmarkEncrypt`/`BenchmarkDecrypt` measure the
+table-driven path.
 
-Place the scaffolding below in your new clean-room package (alias `mynew` for
-the import). It carries `//go:build gost` because both oracles live behind that
-tag.
-
-### Table-driven KAT
-
-Seeded with the exact pinned §A.1 / RFC 7801 §5.5–5.6 vectors already in this doc
-(see [Test vectors](#primary-kat--gost-r-3412-2015-a1--rfc-7801-5556)):
-
-```go
-//go:build gost
-
-package mynew_test
-
-import (
-	"bytes"
-	"encoding/hex"
-	"testing"
-
-	"go.stargrave.org/gogost/v7/gost3412128" // reference oracle (GPL-3.0, test-only)
-	"go.bigb.es/tlsdialer/internal/gost"      // local wrapper oracle
-
-	mynew "your/clean-room/kuznyechik" // clean-room impl under test
-)
-
-func mustHex(t *testing.T, s string) []byte {
-	t.Helper()
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatalf("bad hex %q: %v", s, err)
-	}
-	return b
-}
-
-func TestKuznyechikConformance(t *testing.T) {
-	cases := []struct {
-		name        string
-		key, pt, ct string
-	}{
-		{
-			// GOST R 34.12-2015 §A.1 / RFC 7801 §5.5–5.6
-			name: "RFC7801-A.1",
-			key:  "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef",
-			pt:   "1122334455667700ffeeddccbbaa9988",
-			ct:   "7f679d90bebc24305a468d42b9d4edcd",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			key := mustHex(t, tc.key)
-			pt := mustHex(t, tc.pt)
-			ct := mustHex(t, tc.ct)
-
-			// clean-room impl: a crypto/cipher.Block with BlockSize()==16.
-			blk := mynew.NewCipher(key)
-			gotCT := make([]byte, 16)
-			blk.Encrypt(gotCT, pt)
-			if !bytes.Equal(gotCT, ct) {
-				t.Fatalf("Encrypt: got %x want %x", gotCT, ct)
-			}
-			gotPT := make([]byte, 16)
-			blk.Decrypt(gotPT, ct)
-			if !bytes.Equal(gotPT, pt) {
-				t.Fatalf("Decrypt: got %x want %x", gotPT, pt)
-			}
-
-			// reference 1: raw gogost.
-			ref := gost3412128.NewCipher(key)
-			refCT := make([]byte, gost3412128.BlockSize)
-			ref.Encrypt(refCT, pt)
-			if !bytes.Equal(refCT, ct) {
-				t.Fatalf("gogost Encrypt: got %x want %x", refCT, ct)
-			}
-
-			// reference 2: local wrapper.
-			if w := gost.KuznyechikEncrypt(key, pt); !bytes.Equal(w, ct) {
-				t.Fatalf("gost.KuznyechikEncrypt: got %x want %x", w, ct)
-			}
-			if w := gost.KuznyechikDecrypt(key, ct); !bytes.Equal(w, pt) {
-				t.Fatalf("gost.KuznyechikDecrypt: got %x want %x", w, pt)
-			}
-		})
-	}
-}
-```
-
-### Fuzz harness
-
-Round-trip form (this is a randomized primitive, so the corpus is the raw
-key‖block bytes; for an OID-parameterized primitive you would table over OIDs
-instead):
-
-```go
-//go:build gost
-
-package mynew_test
-
-import (
-	"bytes"
-	"encoding/hex"
-	"testing"
-
-	"go.stargrave.org/gogost/v7/gost3412128"
-	"go.bigb.es/tlsdialer/internal/gost"
-
-	mynew "your/clean-room/kuznyechik"
-)
-
-func FuzzKuznyechikConformance(f *testing.F) {
-	// Seed the corpus from the KAT: 32-byte key ‖ 16-byte block = 48 bytes.
-	key, _ := hex.DecodeString("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
-	pt, _ := hex.DecodeString("1122334455667700ffeeddccbbaa9988")
-	f.Add(append(append([]byte{}, key...), pt...))
-
-	f.Fuzz(func(t *testing.T, data []byte) {
-		// Normalize the random []byte into this primitive's fixed-size args:
-		// 32-byte key + 16-byte block. Skip undersized inputs.
-		if len(data) < 48 {
-			return
-		}
-		key := data[:32]
-		blk := data[32:48]
-
-		mine := mynew.NewCipher(key)
-		mineCT := make([]byte, 16)
-		mine.Encrypt(mineCT, blk)
-
-		// reference 1: raw gogost.
-		refCT := gost.KuznyechikEncrypt(key, blk) // = gost3412128 under the hood
-		_ = gost3412128.BlockSize                 // keep the import honest if unused above
-		if !bytes.Equal(mineCT, refCT) {
-			t.Fatalf("Encrypt mismatch\n key=%x blk=%x\n mine=%x ref=%x",
-				key, blk, mineCT, refCT)
-		}
-
-		// reference 2: local wrapper decrypt path + round-trip identity.
-		minePT := make([]byte, 16)
-		mine.Decrypt(minePT, mineCT)
-		if !bytes.Equal(minePT, blk) {
-			t.Fatalf("round-trip Decrypt(Encrypt(p)) != p\n key=%x p=%x got=%x",
-				key, blk, minePT)
-		}
-		if w := gost.KuznyechikDecrypt(key, mineCT); !bytes.Equal(w, blk) {
-			t.Fatalf("gost.KuznyechikDecrypt mismatch\n key=%x ct=%x got=%x want=%x",
-				key, mineCT, w, blk)
-		}
-	})
-}
-```
-
-(If you ever need the mode primitives instead of the bare block, there is no
-gogost API for some — OMAC, CTR-ACPKM, KEG, KExp15, KeyWrap — so the oracle is
-the gost-engine CLI from the `CLAUDE.md` debugging toolkit. In that case replace
-the `gost3412128`/`gost` calls with a small `exec.Command` helper that shells out,
-e.g. `openssl dgst -engine gost -mac kuznyechik-mac -macopt hexkey:<hex>` or
-`openssl enc -engine gost -kuznyechik-ctr -K <hex> -iv <hex>`, and diff its
-stdout against your impl. Not needed for the block cipher covered here.)
-
-### Run commands
+The **differential gate against the gogost reference is GPL-3.0 and therefore
+must not live in this module** — it lives in the sibling `gostcrypto-compat`
+module (Apache-/GPL-quarantined) at
+`../gostcrypto-compat/parity/kuznyechik/kuznyechik_parity_test.go`, which runs
+this package's `NewCipher` against `go.stargrave.org/gogost/v7/gost3412128`
+(reference oracle) on the pinned KATs and under the differential fuzz target
+`FuzzDiffKuznyechik`. Run it with:
 
 ```sh
-go test -tags gost -run TestKuznyechikConformance ./yourpkg/
-go test -tags gost -fuzz=FuzzKuznyechikConformance -fuzztime=30s ./yourpkg/
+( cd ../gostcrypto-compat && go test ./parity/kuznyechik/ )
+( cd ../gostcrypto-compat && go test -run x -fuzz FuzzDiffKuznyechik -fuzztime 30s ./parity/kuznyechik/ )
 ```
+
+Nothing in `gostcrypto` may import gogost; the parity oracle is intentionally
+quarantined in the compat module per the workspace license boundary.
 
 ---
 

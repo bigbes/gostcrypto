@@ -5,12 +5,24 @@
 // kuznyechik-gost34122015.md (which republishes RFC 7801)
 // and imports no GOST backend.
 //
+// # Side channels
+//
+// This implementation is table-driven and NOT constant-time: it indexes lookup
+// tables by secret state bytes, exposing cache-timing side channels. This
+// matches the gogost/gost-engine references and the software-AES norm. See
+// SECURITY.md for the full timing model and why it is accepted for this
+// reference cipher.
+//
 // # References
 //
 //   - RFC 7801: https://github.com/bigbes/gostcrypto/blob/master/kuznyechik/rfc/rfc7801.txt
 package kuznyechik
 
-import "crypto/cipher"
+import (
+	"crypto/cipher"
+	"encoding/binary"
+	"sync"
+)
 
 // BlockSize is the Kuznyechik block size in bytes (128 bits).
 const BlockSize = 16
@@ -165,6 +177,98 @@ func xor(blk *[BlockSize]byte, k *[BlockSize]byte) {
 	}
 }
 
+// Fused S∘L lookup tables.
+//
+// One Kuznyechik round applies S (the π S-box, per byte) then the linear
+// transform L. Because L is GF(2)-linear, L(S(x)) decomposes over the 16 byte
+// positions:
+//
+//	L(S(x)) = XOR over pos of L(unit block with byte S(x[pos]) at position pos).
+//
+// encTable[pos][b] precomputes that single-position contribution: the 16-byte
+// result of placing S(b) at position pos in an otherwise-zero block and applying
+// L. A combined S+L round then becomes 16 table loads XORed together, replacing
+// the per-bit gf() loop on the hot path. Each 16-byte entry is packed into two
+// big-endian uint64 words so a round folds with two XORs per position instead of
+// sixteen.
+//
+// Decrypt's round body is "L⁻¹ then S⁻¹" applied to a key-mixed block. S⁻¹ is
+// bytewise and cheap; the per-bit gf() cost lived entirely in L⁻¹, so lInvTable
+// fuses L⁻¹ alone (no S-box): lInvTable[pos][b] is L⁻¹ of the block holding raw
+// byte b at position pos. Decrypt applies it as XOR of per-position lifts, then
+// the bytewise sInv, matching the slow lInv/sInv output exactly.
+//
+// Every entry is derived by calling the verified clean-room s/l/lInv on
+// generated unit vectors — no literal tables are introduced. The slow gf()/r()
+// path above remains the source of truth and documents the math.
+type tableEntry struct{ hi, lo uint64 }
+
+var (
+	encTable  [BlockSize][256]tableEntry
+	lInvTable [BlockSize][256]tableEntry
+	tableOnce sync.Once
+)
+
+func packEntry(b *[BlockSize]byte) tableEntry {
+	return tableEntry{
+		hi: binary.BigEndian.Uint64(b[0:8]),
+		lo: binary.BigEndian.Uint64(b[8:16]),
+	}
+}
+
+func buildTables() {
+	for pos := range BlockSize {
+		for b := range 256 {
+			// encTable: S then L of S(b) at position pos.
+			var e [BlockSize]byte
+
+			e[pos] = pi[byte(b)]
+			l(&e)
+
+			encTable[pos][b] = packEntry(&e)
+
+			// lInvTable: L⁻¹ of (raw byte b) at position pos. Used by Decrypt
+			// to apply L⁻¹ to a full block as XOR of per-position lifts.
+			var li [BlockSize]byte
+
+			li[pos] = byte(b)
+			lInv(&li)
+
+			lInvTable[pos][b] = packEntry(&li)
+		}
+	}
+}
+
+// slEncrypt applies one S+L round (S then L) to blk using the fused tables.
+func slEncrypt(blk *[BlockSize]byte) {
+	var hi, lo uint64
+
+	for pos := range BlockSize {
+		t := &encTable[pos][blk[pos]]
+
+		hi ^= t.hi
+		lo ^= t.lo
+	}
+
+	binary.BigEndian.PutUint64(blk[0:8], hi)
+	binary.BigEndian.PutUint64(blk[8:16], lo)
+}
+
+// lInvFast applies L⁻¹ to blk using the fused table.
+func lInvFast(blk *[BlockSize]byte) {
+	var hi, lo uint64
+
+	for pos := range BlockSize {
+		t := &lInvTable[pos][blk[pos]]
+
+		hi ^= t.hi
+		lo ^= t.lo
+	}
+
+	binary.BigEndian.PutUint64(blk[0:8], hi)
+	binary.BigEndian.PutUint64(blk[8:16], lo)
+}
+
 // Cipher is a Kuznyechik block cipher instance holding the 10 expanded round
 // keys.
 type Cipher struct {
@@ -179,6 +283,8 @@ func NewCipher(key []byte) *Cipher {
 	if len(key) != keySize {
 		panic("kuznyechik: invalid key size, want 32 bytes")
 	}
+
+	tableOnce.Do(buildTables)
 
 	c := &Cipher{}
 	c.expandKey(key)
@@ -206,8 +312,7 @@ func (c *Cipher) Encrypt(dst, src []byte) {
 
 	for i := range 9 {
 		xor(&blk, &c.ks[i])
-		s(&blk)
-		l(&blk)
+		slEncrypt(&blk) // fused S then L.
 	}
 
 	xor(&blk, &c.ks[9])
@@ -231,7 +336,7 @@ func (c *Cipher) Decrypt(dst, src []byte) {
 
 	for i := 9; i >= 1; i-- {
 		xor(&blk, &c.ks[i])
-		lInv(&blk)
+		lInvFast(&blk) // fused L⁻¹ (table-driven; output identical to lInv).
 		sInv(&blk)
 	}
 
@@ -256,8 +361,7 @@ func (c *Cipher) expandKey(key []byte) {
 			// F[C]: LSX[C](kr0) XOR kr1, then swap.
 			krt := kr0
 			xor(&krt, &cnst[8*i+j]) // X[C].
-			s(&krt)                 // S.
-			l(&krt)                 // L.
+			slEncrypt(&krt)         // S then L (fused).
 			xor(&krt, &kr1)         // XOR right half.
 
 			kr1 = kr0 // swap.

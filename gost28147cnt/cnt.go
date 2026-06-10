@@ -73,16 +73,15 @@ type CNT struct {
 // NewCNT builds a CNT keystream generator over the configured block cipher c
 // and an 8-byte IV (the synchro value S). The cipher's S-box selection (and
 // hence the TLS suite — CryptoPro-A for 0x0081, tc26-Z for 0xFF85 / 0xC102)
-// is whatever c was constructed with; CNT itself is S-box-agnostic.
-//
-// The S-box is captured here (not exposed by *Cipher) so key meshing can
-// rebuild the cipher under the derived key.
-func NewCNT(c *gost28147.Cipher, iv []byte, sbox gost28147.SBox) *CNT {
+// is read from c.SBox() so that the key-meshing step rebuilds the cipher with
+// the correct S-box automatically. Passing a mismatched S-box separately was
+// the failure mode tracked in gost28147cnt/TODO.md (now resolved).
+func NewCNT(c *gost28147.Cipher, iv []byte) *CNT {
 	if len(iv) != gost28147.BlockSize {
 		panic("gost28147cnt: IV must be 8 bytes")
 	}
 
-	s := &CNT{c: c, sbox: sbox, first: true}
+	s := &CNT{c: c, sbox: c.SBox(), first: true}
 	copy(s.iv[:], iv)
 
 	return s

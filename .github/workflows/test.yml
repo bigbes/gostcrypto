@@ -38,3 +38,9 @@ jobs:
 
       - name: test -race
         run: CGO_ENABLED=1 go test -race ./...
+
+      # MGM-51 regression guard: mgm.maxFieldLen must not return negative values
+      # on 32-bit platforms where int == 32 bits (the Kuznyechik case was broken
+      # before the fix — this cross-compile catches any regression).
+      - name: build (32-bit linux)
+        run: GOOS=linux GOARCH=386 CGO_ENABLED=0 go build ./...

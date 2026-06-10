@@ -2,10 +2,12 @@ package kdftree_test
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"encoding/hex"
 	"testing"
 
 	"github.com/bigbes/gostcrypto/kdftree"
+	"github.com/bigbes/gostcrypto/streebog"
 )
 
 func mustHex(t *testing.T, s string) []byte {
@@ -63,21 +65,27 @@ func TestKDFTree256_KAT1_PerIteration(t *testing.T) {
 }
 
 // KAT-2: same inputs, 32-byte single-block output (L_b = 0x01 0x00).
-// Guide §"KAT-2": this must equal the first 32 bytes of KAT-1, since with
-// keyOutLen=32 the only iteration is K(1) with L_b=0x0100 instead of 0x0200.
-// The L_b change means it is NOT simply a truncation of KAT-1 — it is a fresh
-// HMAC with a different message tail, so we pin the expected first-block value
-// only as a structural invariant: the 32B output's length and determinism.
+// Source: RFC 7836 Appendix B, example 9 (rfc7836.txt:1499-1526), which is the
+// single-block KDF_GOSTR3411_2012_256 = KDFTree256 with R=1, L=256.
+// The HMAC message is: 01|26bdb878|00|af21434145656378|0100
+// Expected output: a1aa5f7de402d7b3d323f2991c8d4534013137010a83754fd0af6d7cd4922ed9.
 func TestKDFTree256_KAT2_32B(t *testing.T) {
 	t.Parallel()
 
 	key := mustHex(t, "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F")
 	label := mustHex(t, "26BDB878")
 	seed := mustHex(t, "AF21434145656378")
+	// RFC 7836 Appendix B example 9 (rfc7836.txt:1499-1526):
+	// KDF_GOSTR3411_2012_256(K_in, label, seed) = HMAC(K, 01|label|00|seed|0100).
+	want := mustHex(t, "a1aa5f7de402d7b3d323f2991c8d4534013137010a83754fd0af6d7cd4922ed9")
 
 	got := kdftree.KDFTree256(key, label, seed, 1, 32)
 	if len(got) != 32 {
 		t.Fatalf("len = %d, want 32", len(got))
+	}
+
+	if !bytes.Equal(got, want) {
+		t.Fatalf("KAT-2 mismatch:\n got  %x\n want %x", got, want)
 	}
 
 	// Determinism.
@@ -97,6 +105,11 @@ func TestKDFTree256_KAT2_32B(t *testing.T) {
 
 // Length-encoding edge: outLen not a multiple of 32 truncates correctly and L_b
 // is derived from the byte length (RFC 7836 §4.4: L = outLen*8, ceil blocks).
+//
+// Content is pinned via an independent in-test HMAC oracle (KDFT-32): each
+// block K(i) is assembled from scratch as hmac(key, [i]_b||label||0x00||seed||[L]_b)
+// with [L]_b = encodeMinBE(outLen*8). This is independent of the package's own
+// counterBytes and encodeNoLeadingZeros helpers.
 func TestKDFTree256_Truncation(t *testing.T) {
 	t.Parallel()
 
@@ -108,6 +121,148 @@ func TestKDFTree256_Truncation(t *testing.T) {
 	if len(got) != 40 {
 		t.Fatalf("len = %d, want 40", len(got))
 	}
+
+	// Content check via independent oracle (KDFT-32): manual HMAC with L=320 bits
+	// (outLen=40 → L_b = 0x01 0x40, which is 2 bytes with no leading zeros).
+	// L_b for 320 bits = 0x140 = two bytes 0x01, 0x40.
+	lRepr40 := []byte{0x01, 0x40} // 320 bits big-endian, no leading zeros.
+	k1 := oracleHMAC(key, []byte{0x01}, label, seed, lRepr40)
+	k2 := oracleHMAC(key, []byte{0x02}, label, seed, lRepr40)
+	wantOracle := append(k1, k2...)[:40]
+
+	if !bytes.Equal(got, wantOracle) {
+		t.Fatalf("Truncation content mismatch (outLen=40):\n got   %x\n oracle %x", got, wantOracle)
+	}
+
+	// Sub-32-byte case: outLen=16 → L = 128 bits → L_b = 0x80 (1 byte, single-block strip).
+	// This exercises the encodeNoLeadingZeros single-byte branch (delta D2).
+	got16 := kdftree.KDFTree256(key, label, seed, 1, 16)
+	if len(got16) != 16 {
+		t.Fatalf("len(got16) = %d, want 16", len(got16))
+	}
+
+	lRepr16 := []byte{0x80} // 128 bits = 0x80 (1 byte; no leading zeros).
+	k1_16 := oracleHMAC(key, []byte{0x01}, label, seed, lRepr16)
+	wantOracle16 := k1_16[:16]
+
+	if !bytes.Equal(got16, wantOracle16) {
+		t.Fatalf("Truncation content mismatch (outLen=16, 1-byte L_b):\n got    %x\n oracle %x", got16, wantOracle16)
+	}
+}
+
+// TestKDFTree256_LBinding asserts that different total output lengths produce
+// different output bytes even for the same inputs and same iteration count —
+// [L]_b is part of every iteration's HMAC message (KDFT-32).
+// Specifically: KDFTree256(..., 17) must NOT be a prefix of KDFTree256(..., 64).
+func TestKDFTree256_LBinding(t *testing.T) {
+	t.Parallel()
+
+	key := mustHex(t, "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F")
+	label := mustHex(t, "26BDB878")
+	seed := mustHex(t, "AF21434145656378")
+
+	got17 := kdftree.KDFTree256(key, label, seed, 1, 17)
+	got64 := kdftree.KDFTree256(key, label, seed, 1, 64)
+
+	if bytes.Equal(got17, got64[:17]) {
+		t.Fatalf("KDFTree256(..., 17) is a prefix of KDFTree256(..., 64) — [L]_b omitted or ignored")
+	}
+}
+
+// TestKDFTree256_CounterWidth pins the counter-width parameter r=2..4 by
+// cross-checking against an in-test manual HMAC oracle (KDFT-31).
+//
+// For each r in 2..4, the oracle builds the per-iteration HMAC message by
+// hand: [i]_b is the low r bytes of i, big-endian (for i=1: 00..0001 r bytes).
+// This is independent of the package's counterBytes helper, so a bug taking
+// the HIGH r bytes (the delta D3 mistake) would surface here.
+func TestKDFTree256_CounterWidth(t *testing.T) {
+	t.Parallel()
+
+	key := mustHex(t, "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F")
+	label := mustHex(t, "26BDB878")
+	seed := mustHex(t, "AF21434145656378")
+
+	// L=512 bits (outLen=64) → [L]_b = 0x02 0x00 (2 bytes, no leading zeros).
+	lRepr64 := []byte{0x02, 0x00}
+
+	for r := 2; r <= 4; r++ {
+		t.Run(func() string {
+			switch r {
+			case 2:
+				return "r=2"
+			case 3:
+				return "r=3"
+			default:
+				return "r=4"
+			}
+		}(), func(t *testing.T) {
+			t.Parallel()
+
+			got := kdftree.KDFTree256(key, label, seed, r, 64)
+			if len(got) != 64 {
+				t.Fatalf("len = %d, want 64", len(got))
+			}
+
+			// Build counter bytes [i]_b: low r bytes of i, big-endian.
+			// i=1: 00..0001 (r bytes), i=2: 00..0002 (r bytes).
+			counter1 := make([]byte, r)
+
+			counter1[r-1] = 0x01
+
+			counter2 := make([]byte, r)
+
+			counter2[r-1] = 0x02
+
+			k1 := oracleHMAC(key, counter1, label, seed, lRepr64)
+			k2 := oracleHMAC(key, counter2, label, seed, lRepr64)
+			want := append(k1, k2...)
+
+			if !bytes.Equal(got, want) {
+				t.Fatalf("r=%d mismatch:\n got  %x\n want %x", r, got, want)
+			}
+		})
+	}
+}
+
+// TestKDFTree256_CounterOverflowPanic pins the boundary of the r-byte counter
+// overflow panic (KDFT-32): outLen=8160 (r=1 max) must succeed; 8161 must panic.
+func TestKDFTree256_CounterOverflowPanic(t *testing.T) {
+	t.Parallel()
+
+	key := make([]byte, 32)
+	label := []byte("level1")
+	seed := make([]byte, 8)
+
+	// 8160 = 32 * 255: the maximum for r=1 (counter fits in one byte, max value 255).
+	got := kdftree.KDFTree256(key, label, seed, 1, 8160)
+	if len(got) != 8160 {
+		t.Fatalf("outLen=8160: len = %d, want 8160", len(got))
+	}
+
+	// 8161 exceeds 32 * 255: must panic.
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for outLen=8161 with r=1")
+		}
+	}()
+
+	kdftree.KDFTree256(key, label, seed, 1, 8161)
+}
+
+// oracleHMAC assembles one iteration's HMAC message as:
+// counterBytes || label || 0x00 || seed || lRepr
+// and computes HMAC-Streebog256(key, message). This is used as an independent
+// oracle in the counter-width and truncation content tests.
+func oracleHMAC(key, counterBytes, label, seed, lRepr []byte) []byte {
+	h := hmac.New(streebog.New256, key)
+	h.Write(counterBytes)
+	h.Write(label)
+	h.Write([]byte{0x00})
+	h.Write(seed)
+	h.Write(lRepr)
+
+	return h.Sum(nil)
 }
 
 func TestKDFTree256_PanicsOnBadArgs(t *testing.T) {

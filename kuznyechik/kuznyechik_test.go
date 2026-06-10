@@ -205,11 +205,108 @@ func TestRoundTripRandom(t *testing.T) {
 func TestNewCipherPanicsOnBadKey(t *testing.T) {
 	t.Parallel()
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic on short key")
-		}
-	}()
+	mustPanic := func(name string, n int) {
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s: expected panic on %d-byte key", name, n)
+			}
+		}()
 
-	NewCipher(make([]byte, 16))
+		NewCipher(make([]byte, n))
+	}
+
+	mustPanic("short", 16)    // under 32 bytes.
+	mustPanic("oversize", 33) // over 32 bytes: len(key) != keySize rejects this too.
+}
+
+// TestEncryptDecryptInPlace pins full-overlap (dst == src) aliasing for the §A.1
+// vector: cipher.Block permits dst and src to overlap entirely, and in-module
+// omac.go relies on Encrypt(b, b). A future table tweak writing dst incrementally
+// must not break this. (KUZN-46).
+func TestEncryptDecryptInPlace(t *testing.T) {
+	t.Parallel()
+
+	key := mustHex(t, "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
+	pt := mustHex(t, "1122334455667700ffeeddccbbaa9988")
+	ct := mustHex(t, "7f679d90bebc24305a468d42b9d4edcd")
+
+	c := NewCipher(key)
+
+	enc := append([]byte(nil), pt...)
+	c.Encrypt(enc, enc)
+
+	if !bytes.Equal(enc, ct) {
+		t.Fatalf("in-place Encrypt: got %x want %x", enc, ct)
+	}
+
+	dec := append([]byte(nil), ct...)
+	c.Decrypt(dec, dec)
+
+	if !bytes.Equal(dec, pt) {
+		t.Fatalf("in-place Decrypt: got %x want %x", dec, pt)
+	}
+}
+
+// TestNewCipherCopiesKey pins that NewCipher does not retain the caller's key
+// slice: zeroing the key after construction must not change ciphertext. (KUZN-47)
+func TestNewCipherCopiesKey(t *testing.T) {
+	t.Parallel()
+
+	key := mustHex(t, "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
+	pt := mustHex(t, "1122334455667700ffeeddccbbaa9988")
+	want := mustHex(t, "7f679d90bebc24305a468d42b9d4edcd")
+
+	c := NewCipher(key)
+
+	for i := range key {
+		key[i] = 0
+	}
+
+	got := make([]byte, BlockSize)
+	c.Encrypt(got, pt)
+
+	if !bytes.Equal(got, want) {
+		t.Fatalf("ciphertext changed after zeroing caller key: got %x want %x", got, want)
+	}
+}
+
+// BenchmarkEncrypt measures single-block throughput of the table-driven path.
+func BenchmarkEncrypt(b *testing.B) {
+	key := mustHexB(b, "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
+	c := NewCipher(key)
+	src := mustHexB(b, "1122334455667700ffeeddccbbaa9988")
+	dst := make([]byte, BlockSize)
+
+	b.SetBytes(BlockSize)
+	b.ResetTimer()
+
+	for range b.N {
+		c.Encrypt(dst, src)
+	}
+}
+
+// BenchmarkDecrypt mirrors BenchmarkEncrypt for the inverse path.
+func BenchmarkDecrypt(b *testing.B) {
+	key := mustHexB(b, "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
+	c := NewCipher(key)
+	src := mustHexB(b, "7f679d90bebc24305a468d42b9d4edcd")
+	dst := make([]byte, BlockSize)
+
+	b.SetBytes(BlockSize)
+	b.ResetTimer()
+
+	for range b.N {
+		c.Decrypt(dst, src)
+	}
+}
+
+func mustHexB(b *testing.B, s string) []byte {
+	b.Helper()
+
+	out, err := hex.DecodeString(s)
+	if err != nil {
+		b.Fatalf("bad hex %q: %v", s, err)
+	}
+
+	return out
 }

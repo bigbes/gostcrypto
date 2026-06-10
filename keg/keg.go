@@ -28,16 +28,28 @@ import (
 const (
 	// ukmLen is the byte length of the VKO UKM taken from ukm_source[0:16].
 	ukmLen = 16
-	// kdfSeedEnd is the end offset of the 8-byte KDF seed ukm_source[16:24];
-	// ukm_source must hold at least this many bytes.
+	// kdfSeedEnd is the end offset of the 8-byte KDF seed ukm_source[16:24].
 	kdfSeedEnd = 24
+	// ukmSourceLen is the exact ukm_source length: 32 bytes, the size of
+	// Streebog256(client_random ‖ server_random) in RFC 9189 TLS. The spec
+	// (keg.md §Sizes) fixes it at exactly 32, and the downstream KExp15 IV is
+	// read from ukm_source[24:24+ivLen], so a shorter ukm_source is malformed.
+	ukmSourceLen = 32
 	// outLen is the KDFTree output length in bytes (the 64-byte export block).
 	outLen = 64
+	// max256BitLen is the largest field-prime bit length accepted by the
+	// 256-bit KEG: a curve whose P.BitLen() exceeds this is a 512-bit curve,
+	// which uses a different algorithm KEG2012_256 does not implement.
+	max256BitLen = 256
 )
 
-// errShortUKM is returned when ukm_source is too short to yield the 16-byte VKO
-// UKM and the 8-byte KDF seed (need at least 24 bytes).
-var errShortUKM = errors.New("keg: ukm_source must be at least 24 bytes")
+// errUKMSourceLen is returned when ukm_source is not exactly 32 bytes.
+var errUKMSourceLen = errors.New("keg: ukm_source must be exactly 32 bytes")
+
+// errCurve512 is returned when a 512-bit curve is supplied: KEG2012_256
+// implements only the 256-bit case (NID_id_GostR3410_2012_256). The 512-bit
+// KEG is a distinct algorithm (keg.md §Specification) not handled here.
+var errCurve512 = errors.New("keg: KEG2012_256 supports only 256-bit curves; 512-bit curve rejected")
 
 // kdfLabel is the fixed 8-byte ASCII label "kdf tree" (no NUL terminator); a
 // separate 0x00 separator follows it inside KDFTree. keg.md §"Step 3".
@@ -57,9 +69,13 @@ func curveTC26256A() *gost3410curves.Curve {
 // KEG2012_256 derives the 64-byte export key block for the 256-bit GOST TLS
 // suites (keg.md §Specification, R 1323565.1.020-2018 §6.4.5.1).
 //
-// The curve argument is accepted for call-site symmetry with the in-repo oracle
-// but ignored: KEG2012_256 always operates on TC26 256-bit ParamSet A, the curve
-// the algorithm is specified against.
+// The curve argument selects the 256-bit GOST R 34.10-2012 domain the VKO and
+// scalar steps run on — "whatever 256-bit curve the certificate uses",
+// including the CryptoPro paramsets signalled as GC256B/C/D (RFC 9189
+// §A.1.3 / keg/rfc/rfc9189.txt). A nil curve defaults to TC26 256-bit
+// ParamSet A (OID 1.2.643.7.1.2.1.1.1), the curve the algorithm is specified
+// against. A 512-bit curve is rejected (errCurve512): the 512-bit KEG is a
+// different algorithm not implemented here.
 //
 // Inputs:
 //   - serverPub:  peer GOST 2012-256 public key, 64 raw bytes (LE X ‖ LE Y).
@@ -70,11 +86,17 @@ func curveTC26256A() *gost3410curves.Curve {
 //
 //	expkeys[ 0:32] = MAC key
 //	expkeys[32:64] = cipher key
-func KEG2012_256(curve any, serverPub, clientPriv, ukmSource []byte) ([64]byte, error) {
+func KEG2012_256(curve *gost3410curves.Curve, serverPub, clientPriv, ukmSource []byte) ([64]byte, error) {
 	var out [64]byte
 
-	if len(ukmSource) < kdfSeedEnd {
-		return out, errShortUKM
+	if len(ukmSource) != ukmSourceLen {
+		return out, errUKMSourceLen
+	}
+
+	if curve == nil {
+		curve = curveTC26256A()
+	} else if curve.P.BitLen() > max256BitLen {
+		return out, errCurve512
 	}
 
 	// Step 1 — UKM adjustment (keg.md §"Step 1").
@@ -99,10 +121,12 @@ func KEG2012_256(curve any, serverPub, clientPriv, ukmSource []byte) ([64]byte, 
 	}
 
 	// Step 2 — VKO 2012-256 shared secret (keg.md §"Step 2").
-	// tmpkey = VKO_GOSTR3411_2012_256(serverPub, clientPriv, real_ukm) on TC26
-	// 256-A. The sibling vko package handles the LE point-mul, cofactor-4 clear,
-	// LE(X)‖LE(Y) serialization and the Streebog-256 finalize.
-	tmpkey, err := vko.KEK2012256(curveTC26256A(), clientPriv, serverPub, realUKM)
+	// tmpkey = VKO_GOSTR3411_2012_256(serverPub, clientPriv, real_ukm) on the
+	// selected 256-bit curve. The sibling vko package handles the LE point-mul,
+	// cofactor clear, LE(X)‖LE(Y) serialization, the Streebog-256 finalize, and
+	// validates that serverPub/clientPriv lengths and on-curve membership are
+	// correct (those errors propagate out unchanged).
+	tmpkey, err := vko.KEK2012256(curve, clientPriv, serverPub, realUKM)
 	if err != nil {
 		return out, err
 	}

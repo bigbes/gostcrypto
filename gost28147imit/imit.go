@@ -141,16 +141,20 @@ func (c *macCipher) mesh() {
 }
 
 // imit computes the full 8-byte IMIT tag of msg under key/sbox, starting from
-// the given 8-byte iv state, applying CryptoPro key meshing. This implements
-// the gost-engine finalization order: full blocks first, a trailing partial
-// is zero-padded and processed, and for total length 1..8 (count == 0 at
+// an all-zero IV state, applying CryptoPro key meshing. This implements the
+// gost-engine finalization order: full blocks first, a trailing partial is
+// zero-padded and processed, and for total length 1..8 (count == 0 at
 // finalization) one extra all-zero block is appended AFTER the data block
 // (guide §2.1 rule 3 / D5).
-func imit(key, iv, msg []byte, sbox gost28147.SBox) []byte {
+//
+// Non-zero-IV (UKM) IMIT — e.g. the key-transport IMIT over the session key
+// (RFC 4357 §6.3, guide D8) — is implemented inline in keywrap.imit4, which
+// also needs diversification-keyed rounds this package does not expose.
+// See keywrap/keywrap.go and guide §D8 for that path.
+func imit(key, msg []byte, sbox gost28147.SBox) []byte {
 	c := newMACCipher(key, sbox)
 
 	state := make([]byte, blockSize)
-	copy(state, iv)
 
 	// count = bytes of full blocks processed, wrapped mod 1024; the mesh
 	// fires when count == 1024 BEFORE processing the next block, and the
@@ -213,7 +217,16 @@ func imit(key, iv, msg []byte, sbox gost28147.SBox) []byte {
 // outside this package needs but which gost28147.Cipher does not expose.
 //
 // key must be 32 bytes; block must be 8 bytes.
+// Panics if len(key) != 32 or len(block) != 8.
 func SeqMACBlock(key []byte, sbox gost28147.SBox, block []byte) []byte {
+	if len(key) != keySize {
+		panic("gost28147imit: SeqMACBlock: key must be 32 bytes")
+	}
+
+	if len(block) != blockSize {
+		panic("gost28147imit: SeqMACBlock: block must be 8 bytes")
+	}
+
 	c := newMACCipher(key, sbox)
 	state := make([]byte, blockSize)
 	c.macBlock(state, block)
@@ -231,16 +244,18 @@ func IMIT(key, msg []byte) []byte {
 	}
 
 	if len(msg) == 0 {
-		// An empty message would return the key-independent IV-derived state
-		// (0x00000000), which is not a meaningful MAC; gost-engine errors on
-		// it too. TLS never MACs an empty input (the framing prefix is >= 13
-		// bytes), so reject it loudly rather than emit a forgeable constant.
+		// An empty message would return the key-independent all-zero IV state
+		// (0x0000000000000000), which is not a meaningful MAC. Note: gost-engine
+		// succeeds on empty input and returns 0x00000000 (it processes zero
+		// blocks and emits the IV state); this package rejects it instead.
+		// TODO.md does not list this as a known divergence — TLS framing ensures
+		// the MAC input is never empty (the prefix is >= 13 bytes, guide D7), so
+		// the divergence is unreachable in practice. We reject loudly rather than
+		// emitting a forgeable constant.
 		panic("gost28147imit: empty message")
 	}
 
-	var iv [blockSize]byte
-
-	full := imit(key, iv[:], msg, gost28147.SboxCryptoProA)
+	full := imit(key, msg, gost28147.SboxCryptoProA)
 
 	return full[:tlsTagLen]
 }

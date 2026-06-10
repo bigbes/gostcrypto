@@ -24,23 +24,27 @@ The 64-byte output then feeds `gost_kexp15` (KExp15 key wrap) to encrypt the
 32-byte pre-master secret. KEG itself produces *only* the key block; it does not
 do the wrapping.
 
-## Where this repo uses it
+## Where this lives
 
-- Wrapper / de-facto spec: `internal/gost/keg_gost.go` — `KEG2012_256(curve, serverPubRaw, clientPrivRaw, ukmSource)`.
-- KDF helper it calls: `internal/gost/kdftree_gost.go` — `KDFTree2012_256`.
-- TLS call site (client ClientKeyExchange build): `tls/internal/ke/gost2018.go:187-202`.
-  There `expkeys[:32]` is passed as the **MAC** key and `expkeys[32:]` as the
-  **cipher** key to `gost.Kexp15`, and the IV is `ukm[24:24+ivLen]`.
-- Handshake wiring: `tls/internal/handshake/kex_gost.go:51`.
+- Clean-room implementation: `keg/keg.go` — `KEG2012_256(curve, serverPub, clientPriv, ukmSource)`.
+- Tests: `keg/keg_test.go` (KAT, pair symmetry, zero-UKM byte-position KAT,
+  exact-32-byte UKM contract, bad-key error pass-through, non-TC26-A curve and
+  512-bit-curve rejection).
+- Differential parity vs. the gogost reference: `../gostcrypto-compat/parity/keg/`
+  (`keg_parity_test.go` — oracle KAT, ephemeral-key differentials including the
+  zero-UKM branch, and `FuzzKEG2012_256_DiffOracle`).
+- KDF helper it calls: the sibling `kdftree` package — `KDFTree256`.
+- The 64-byte output is consumed by `kexp15.Kexp15`: `expkeys[:32]` is the MAC
+  key, `expkeys[32:]` the cipher key, and the IV is `ukm_source[24:24+ivLen]`
+  taken by the caller (the gostls TLS client wires this up).
 
-**statusKind: gogost-backed.** `KEG2012_256` does not reimplement the GOST
-primitives — it calls gogost's `gost3410.KEK2012256` (VKO) and reuses our
-`KDFTree2012_256`, which itself calls gogost's `gost34112012256.New`
-(Streebog-256) as the HMAC hash. The UKM-adjust and label/seed plumbing are
-local; the cryptographic cores come from `go.stargrave.org/gogost/v7`
-(GPL-3.0, vendored at `third_party/gogost`). A GPL-free reimplementation must
-supply Streebog-256, HMAC, and VKO 2012-256 (EC point multiply on the TC26
-curves) and then wire them exactly as this doc describes.
+**statusKind: clean-room (BSD-2-Clause).** `keg.KEG2012_256` is a clean-room
+implementation that imports only the sibling clean-room packages
+`gost3410curves`, `vko` and `kdftree` (Streebog-256, HMAC, VKO 2012-256 and the
+KDF tree all live in this BSD module; the module graph contains no gogost/GPL
+code). The UKM-adjust and label/seed plumbing are local. Equivalence to the
+gogost reference is proven only by the GPL-side parity suite in
+`../gostcrypto-compat/parity/keg/`, never by importing gogost here.
 
 ## Specification
 
@@ -54,7 +58,7 @@ KEG for the 256-bit case (`NID_id_GostR3410_2012_256`) is the engine function
 | `ukm_source`  | 32 bytes  | UKM material. In RFC 9189 TLS this is `Streebog256(client_random ‖ server_random)` (64-byte concatenation → 32-byte digest), see `tls/internal/ke/gost2018.go:160-165`. |
 | `pub_key`     | EC point  | Peer's GOST 2012-256 public key (in this repo, 64-byte raw `LE X ‖ LE Y`; note gogost/engine raw order is `LE X ‖ LE Y`). |
 | `priv_key`    | scalar    | Local GOST 2012-256 private key (32-byte LE). |
-| Curve         | —         | A GOST R 34.10-2012 256-bit curve, e.g. TC26 ParamSet A (OID `1.2.643.7.1.2.1.1.1`). |
+| Curve         | —         | The GOST R 34.10-2012 256-bit curve the keys live on — whatever curve the server certificate uses, including the CryptoPro paramsets signalled GC256B/C/D (RFC 9189). A `nil` curve defaults to TC26 ParamSet A (OID `1.2.643.7.1.2.1.1.1`). A 512-bit curve is rejected with an error (the 512-bit KEG is a distinct algorithm not implemented here). |
 
 ### Step 1 — UKM adjustment
 
@@ -330,203 +334,42 @@ Each step is independently testable against a vector; do them in order.
 
 Differential strategy for a clean-room KEG: there is **no gogost-level "KEG"
 primitive** to diff against — gogost only exposes the VKO and KDF cores, and KEG
-assembles them. So the two reference targets are (1) the in-repo
-`internal/gost.KEG2012_256` (`internal/gost/keg_gost.go:36`), which is itself
-gogost-backed and the de-facto spec this repo matches, and (2) the pinned
-RFC 9189 / engine-oracle vector inlined in this doc (the 64-byte `expkeys` block
-from the TC26 ParamSet A row above, cross-checked against
-`openssl pkeyutl -derive -engine gost`). The fuzz contract: feed random
-private-key + UKM material through both the clean-room impl and the in-repo
-reference, normalize to KEG's fixed-size arguments (64-byte raw pub, 32-byte LE
-priv, 32-byte UKM), and assert the two 64-byte outputs are byte-identical. KEG is
-pair-symmetric (`KEG(B_pub, A_priv, ukm) == KEG(A_pub, B_priv, ukm)`,
-`internal/gost/keg_gost_test.go:40`), so the fuzzer also asserts that round-trip
-property — a free oracle that needs no external key.
+assembles them. So the two reference targets are (1) the gogost-backed
+`gostcryptocompat.KEG2012_256` in the GPL companion module (which is the de-facto
+spec this clean-room implementation matches), and (2) the pinned RFC 9189 /
+engine-oracle vector from the TC26 ParamSet A "Complete runnable vector" row
+above, cross-checked against `openssl pkeyutl -derive -engine gost`.
 
-Note on the curve handle: `internal/gost.Curve` is an opaque wrapper whose
-`inner` field is **unexported**, so a clean-room test *outside* the `gost`
-package cannot write `&gost.Curve{inner: …}`. Construct the 256-bit TC26-A curve
-via the exported constructor the package provides:
-`gost.CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 1, 1})`
-(OID `1.2.643.7.1.2.1.1.1`). The examples below use that form. The clean-room
-impl under test is imported as `mynew`.
+The tests are split across the license boundary:
 
-### Table-driven KAT
+- **BSD module (`keg/keg_test.go`)** — self-contained checks that do not need
+  gogost: the pinned KAT (both A→B and B→A directions), the documented
+  MAC/cipher output split, pair symmetry, the zero-UKM special-case *byte-position*
+  KAT (`real_ukm = 00…00 01`, computed once from the gogost reference and
+  inlined as a constant), the exact-32-byte ukm_source contract, the bad-key
+  error pass-through (wrong-length / off-curve pub, wrong-length / zero priv),
+  honoring a non-TC26-A 256-bit curve (CryptoPro-A), and rejecting a 512-bit
+  curve.
+- **GPL module (`../gostcrypto-compat/parity/keg/keg_parity_test.go`)** — the
+  differential and fuzz oracles that require gogost: `TestKEG2012_256_DiffOracle`
+  pins clean-room == gogost on the doc KAT; `TestKEG2012_256_DiffEphemeral`
+  draws fresh ephemeral keypairs (including the zero-UKM and 0xFF-UKM cases) and
+  checks clean-room == oracle plus pair symmetry; `FuzzKEG2012_256_DiffOracle`
+  fuzzes two 32-byte seeds + a UKM, generates valid keypairs via the oracle's
+  `GenerateEphemeralKey`, and asserts the clean-room KEG equals the oracle KEG
+  and is pair-symmetric. The fuzz contract is "byte-identical 64-byte outputs",
+  with KEG's pair symmetry (`KEG(B_pub, A_priv, ukm) == KEG(A_pub, B_priv, ukm)`)
+  as a free oracle that needs no externally pinned answer.
 
-Reuses the exact pinned hex from the "Complete runnable vector" row above; no new
-bytes are invented.
-
-```go
-//go:build gost
-
-package keg_conformance
-
-import (
-	"bytes"
-	"encoding/asn1"
-	"encoding/hex"
-	"testing"
-
-	gost "go.bigb.es/tlsdialer/internal/gost" // in-repo reference
-	mynew "example.com/keg"          // clean-room impl under test
-)
-
-func mustHex(t *testing.T, s string) []byte {
-	t.Helper()
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatalf("bad hex %q: %v", s, err)
-	}
-	return b
-}
-
-func TestKEGConformance(t *testing.T) {
-	curve, err := gost.CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 1, 1})
-	if err != nil {
-		t.Fatalf("CurveByOID: %v", err)
-	}
-
-	const (
-		privAHex = "9f7d8e9fff181ad801ccebef0a5ba7c3c3353e0a7c16b4d16a20835a87b7eb0d"
-		pubBHex  = "c0ec907466beb2eb5ea1bbd2f6015b710c775b88efca1f558cc81038617f8888" +
-			"8884f2471bba3e2468564213f04e71700151747941f6a3032085321e9b3aa602"
-		privBHex = "bf4a0b1fe9eaa93529ec31ebc4eef2d92c198f970d9e3a523105db2156dfc607"
-		pubAHex  = "a53d0c904d0c13835c5ebd3e35414e5182f3a9320f91ccec177b284eb407af2c" +
-			"6b819ec462ebf933dabba24fb3c741ebe498faf2b8f4eaa21b091d6ab52cd3c4"
-		ukmHex  = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-		wantHex = "bc2b44f590b48adcea709a0485f7054462a7b3bc738d7cbbf972bd309d671900" +
-			"39eb73d0237a338ffa142d810f844206fcd36d6296df6f6f9149749b2db1e62b"
-	)
-
-	cases := []struct {
-		name              string
-		pub, priv         string
-	}{
-		{"privA_pubB", pubBHex, privAHex},
-		{"privB_pubA", pubAHex, privBHex}, // symmetric: same expkeys
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			pub, priv, ukm := mustHex(t, tc.pub), mustHex(t, tc.priv), mustHex(t, ukmHex)
-			want := mustHex(t, wantHex)
-
-			ref, err := gost.KEG2012_256(curve, pub, priv, ukm)
-			if err != nil {
-				t.Fatalf("reference KEG: %v", err)
-			}
-			if !bytes.Equal(ref[:], want) {
-				t.Fatalf("reference != pinned vector:\n got %x\nwant %x", ref[:], want)
-			}
-
-			got, err := mynew.KEG2012_256(curve, pub, priv, ukm)
-			if err != nil {
-				t.Fatalf("clean-room KEG: %v", err)
-			}
-			if got != ref {
-				t.Fatalf("clean-room != reference:\n got %x\n ref %x", got[:], ref[:])
-			}
-		})
-	}
-}
-```
-
-### Fuzz harness
-
-Seeds the corpus from the KAT inputs, then for each random draw derives a fresh
-A/B keypair so the symmetric round-trip oracle holds without a pinned answer.
-`GenerateEphemeralKey(curve, io.Reader)` (`internal/gost/keg_gost_test.go:53`) is
-the in-repo helper that turns a byte seed into a `(privRaw, pubRaw)` pair.
-
-```go
-//go:build gost
-
-package keg_conformance
-
-import (
-	"bytes"
-	"encoding/asn1"
-	"testing"
-
-	gost "go.bigb.es/tlsdialer/internal/gost"
-	mynew "example.com/keg"
-)
-
-func FuzzKEGConformance(f *testing.F) {
-	curve, err := gost.CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 1, 1})
-	if err != nil {
-		f.Fatalf("CurveByOID: %v", err)
-	}
-
-	// Seed from the KAT: two 32-byte key seeds + one 32-byte UKM = 96 bytes.
-	f.Add(bytes.Repeat([]byte{0x11}, 96))
-	f.Add(append(append(
-		mustHexF(f, "9f7d8e9fff181ad801ccebef0a5ba7c3c3353e0a7c16b4d16a20835a87b7eb0d"),
-		mustHexF(f, "bf4a0b1fe9eaa93529ec31ebc4eef2d92c198f970d9e3a523105db2156dfc607")...),
-		mustHexF(f, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")...))
-
-	f.Fuzz(func(t *testing.T, raw []byte) {
-		// Normalize to KEG's fixed-size arguments: 32B seedA, 32B seedB, 32B ukm.
-		buf := make([]byte, 96)
-		copy(buf, raw)
-		seedA, seedB, ukm := buf[0:32], buf[32:64], buf[64:96]
-
-		privA, pubA, err := gost.GenerateEphemeralKey(curve, bytes.NewReader(seedA))
-		if err != nil {
-			t.Skip() // degenerate seed; not a KEG bug
-		}
-		privB, pubB, err := gost.GenerateEphemeralKey(curve, bytes.NewReader(seedB))
-		if err != nil {
-			t.Skip()
-		}
-
-		// Reference (in-repo) and clean-room must agree on KEG(B_pub, A_priv).
-		ref, err := gost.KEG2012_256(curve, pubB, privA, ukm)
-		if err != nil {
-			t.Fatalf("reference KEG: %v", err)
-		}
-		got, err := mynew.KEG2012_256(curve, pubB, privA, ukm)
-		if err != nil {
-			t.Fatalf("clean-room KEG: %v", err)
-		}
-		if got != ref {
-			t.Fatalf("clean-room != reference\nseedA=%x seedB=%x ukm=%x\n got %x\n ref %x",
-				seedA, seedB, ukm, got[:], ref[:])
-		}
-
-		// Free oracle: pair symmetry KEG(B_pub,A_priv) == KEG(A_pub,B_priv).
-		sym, err := mynew.KEG2012_256(curve, pubA, privB, ukm)
-		if err != nil {
-			t.Fatalf("clean-room KEG (symmetric): %v", err)
-		}
-		if sym != got {
-			t.Fatalf("clean-room KEG not pair-symmetric\n A→B %x\n B→A %x", got[:], sym[:])
-		}
-	})
-}
-
-func mustHexF(f *testing.F, s string) []byte {
-	f.Helper()
-	b := make([]byte, len(s)/2)
-	if _, err := hexDecode(b, s); err != nil {
-		f.Fatalf("bad hex: %v", err)
-	}
-	return b
-}
-```
-
-(`mustHex`/`hexDecode` use `encoding/hex`; collapse the two helpers if both files
-live in one package.) No gost-engine CLI helper is needed here — KEG's reference
-is the in-repo Go function plus the pinned vector, both callable directly. (The
-OMAC / CTR-ACPKM / KExp15 / KeyWrap guides shell out to the
-`openssl ... -engine gost` oracle from CLAUDE.md instead, because those have no
-gogost API surface; KEG does, via the in-repo wrapper.)
+This keeps every gogost import on the GPL side; the BSD module never imports
+gogost (the module rule), and the two suites together pin both the exact wire
+bytes and the clean-room ↔ reference equivalence.
 
 ### Run
 
 ```sh
-go test -tags gost -run TestKEGConformance ./yourpkg/
-go test -tags gost -fuzz=FuzzKEGConformance -fuzztime=30s ./yourpkg/
+go test ./keg/                                    # BSD self-contained suite
+( cd ../gostcrypto-compat && go test ./parity/keg/ )   # GPL differential + fuzz
 ```
 
 ## References
@@ -546,16 +389,17 @@ go test -tags gost -fuzz=FuzzKEGConformance -fuzztime=30s ./yourpkg/
 
 Source citations (file:line):
 
-- `internal/gost/keg_gost.go:36-80` — `KEG2012_256` wrapper (de-facto spec this repo matches).
-- `internal/gost/kdftree_gost.go:27-50` — `KDFTree2012_256`.
-- `internal/gost/keg_gost_test.go:105-166` — engine-oracle KAT (the vector above).
-- `tls/internal/ke/gost2018.go:187-202` — TLS call site + MAC/cipher split + IV.
-- `tls/internal/handshake/kex_gost.go:51` — handshake wiring.
+- `keg/keg.go` — the clean-room `KEG2012_256` implementation.
+- `keg/keg_test.go` — KAT, zero-UKM byte-position KAT, UKM-length, bad-key and
+  curve-handling tests.
+- `kdftree/` (sibling package) — `KDFTree256`, the KDF tree step.
+- `vko/` (sibling package) — `KEK2012256`, the VKO 2012-256 agreement step.
+- `../gostcrypto-compat/keg_gost.go` — the gogost-backed reference KEG2012_256
+  (GPL; the de-facto spec this clean-room implementation matches).
+- `../gostcrypto-compat/parity/keg/keg_parity_test.go` — differential + fuzz
+  parity vs. the reference.
 - `tmp/engine/gost_ec_keyx.c:132-179` — `gost_keg` ground truth.
 - `tmp/engine/gost_ec_keyx.c:27-126` — `VKO_compute_key` ground truth.
 - `tmp/engine/gost_keyexpimp.c:201-259` — `gost_kdftree2012_256` ground truth.
 - `tmp/engine/test_derive.c:338-364` — symmetric KEG test.
-- `third_party/gogost/gost3410/vko2012.go:28-38` — gogost `KEK2012256` (VKO).
-- `third_party/gogost/gost3410/vko.go:23-37` — gogost `KEK` (cofactor handling).
-- `third_party/gogost/gost3410/ukm.go:23-29` — gogost `NewUKM` (the second reversal).
 - `TODO.md` — confirms no listed gogost↔engine divergence touches KEG.

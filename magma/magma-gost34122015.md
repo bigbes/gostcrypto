@@ -34,45 +34,38 @@ linear-mixing GF(2⁸) multiply-and-reduce step belongs to *Kuznyechik*,
 GOST R 34.12-2015's **128-bit** cipher — a structurally different algorithm.
 Do not import any GF reduction here.)
 
-**Repo status: gogost-backed.** Every byte of this primitive currently comes
-from `go.stargrave.org/gogost/v7/gost341264` (vendored at
-`third_party/gogost/gost341264/`, GPL-3.0), which is itself a 51-line shim
-over `go.stargrave.org/gogost/v7/gost28147`. `internal/gost` only wraps it.
-This document exists to enable a GPL-free clean-room reimplementation, per the
-"BSD reimplementation" priority list in `TODO.md`.
+**Repo status: clean-room implementation.** `magma/magma.go` IS the
+implementation — zero GPL code in this module's dependency graph. The
+`go.mod` carries no gogost dependency; `internal/` and `third_party/`
+do not exist here. This document serves as the authoritative implementation
+guide; there is nothing to "enable" — the implementation already lives here.
 
-**Where the repo uses it (call sites)**
+**Where this module uses it (call sites)**
 
-- `internal/gost/exports_gost.go:34` — `MagmaBlockSize = gost341264.BlockSize`
-  (= 8).
-- `internal/gost/exports_gost.go:76` — `NewMagmaCipher(key) cipher.Block`,
-  the opaque `cipher.Block` handle used by all the modes below.
-- `internal/gost/primitives_gost.go:103-117` — `MagmaEncrypt` / `MagmaDecrypt`
-  (single 8-byte block, the fixed tc26-Z S-box, no caller-selectable S-box).
-- TLS suite **0xC101** `GOST2012-MAGMA-MAGMAOMAC` (RFC 9189 §4.4 / RFC 9367 —
-  Magma in CTR mode + OMAC-8). Registered in
-  `tls/internal/suites/gost_suites.go:244-249` (`specMagmaCTROMAC` at
-  `:124`, `specMagmaOMAC` at `:133`). KEX is **GOST18** (RFC 9367
-  key-transport), *not* the GOST VKO used by 0xFF85 — see
-  `gost_suites.go:242` and `CLAUDE.md`.
-- Record protector: `tls/internal/record/protection_ctromac_gost.go`
-  (CTR + OMAC, intra-record ACPKM re-keying).
-- ACPKM key meshing for Magma: `internal/gost/magma_acpkm_test.go`,
-  `tls/internal/ke/gost2018.go`.
-- Other modes built on the `cipher.Block`: `internal/gost/ctr_gost.go`
-  (`NewCTR`), `internal/gost/omac.go` (OMAC), `internal/gost/mgm_test.go`,
-  `internal/gost/cipher_modes_test.go` (CBC), `internal/gost/kexp15_gost.go`
-  (kexp15 key export), `internal/gost/tlstree_gost.go`.
+- `exports.go:35` — `MagmaBlockSize = magma.BlockSize` (= 8).
+- `exports.go:104` — `NewMagmaCipher(key) cipher.Block`, the opaque
+  `cipher.Block` handle used by all composing modes.
+- `primitives.go` — `MagmaEncrypt` / `MagmaDecrypt` (single 8-byte block,
+  fixed tc26-Z S-box, no caller-selectable S-box).
+- `magma/magma_test.go` and `magma/guard_test.go` — in-package KATs (RFC
+  8891 A.3–A.4, GOST R 34.13-2015 §A.2.1 multi-block ECB), in-place
+  Encrypt/Decrypt coverage, and panic-contract tests.
+- Differential parity tests vs the gogost reference live in
+  `../gostcrypto-compat/parity/magma/` (GPL-quarantined, not in this module's
+  CI) and pass — that is the strongest external correctness signal.
+- TLS suite **0xC101** `GOST2012-MAGMA-MAGMAOMAC` (RFC 9189 §4.4) uses Magma
+  in CTR mode + OMAC; the dialer's end-to-end EE tests exercise the full
+  block→CTR→OMAC→ACPKM stack against a live Tarantool EE server.
 
 **Dimensions (constants)**
 
 | Quantity            | Value              | Source |
 |---------------------|--------------------|--------|
-| Block size          | 8 bytes (64 bit)   | `third_party/gogost/gost341264/cipher.go:24` (`BlockSize = 8`) |
-| Key size            | 32 bytes (256 bit) | `third_party/gogost/gost341264/cipher.go:25` (`KeySize = 32`) |
+| Block size          | 8 bytes (64 bit)   | `magma/magma.go` `BlockSize = 8` |
+| Key size            | 32 bytes (256 bit) | `magma/magma.go` `KeySize = 32` |
 | Subkeys             | 8 × 32-bit         | same as 28147-89 core |
-| Rounds (enc/dec)    | 32                 | `gost28147` `SeqEncrypt`/`SeqDecrypt` (sibling §4/§5) |
-| S-box               | tc26 param-Z, fixed | `cipher.go:45` (`SboxIdtc26gost28147paramZ`) |
+| Rounds (enc/dec)    | 32                 | `seqEncrypt`/`seqDecrypt` (sibling §4/§5) |
+| S-box               | tc26 param-Z, fixed | `magma/magma.go` `sboxTC26Z` |
 
 
 ## Specification
@@ -306,9 +299,8 @@ same standard. Keep the two implementations entirely separate.
 
 ### V1. RFC 8891 Appendix A single-block KAT (inline, authoritative)
 
-Verbatim from RFC 8891 Appendix A.3–A.4. This is the same vector gogost pins in
-`third_party/gogost/gost341264/cipher_test.go:28-46`, confirming the repo's
-backend reproduces it.
+Verbatim from RFC 8891 Appendix A.3–A.4. Pinned by `TestRFC8891KAT` and
+`TestEncryptDecryptInPlace` in `magma/magma_test.go` and `magma/guard_test.go`.
 
 ```
 key (32B):        ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
@@ -316,24 +308,29 @@ plaintext (8B):   fedcba9876543210
 ciphertext (8B):  4ee901e5c2d8ca3d
 ```
 
-A correct from-scratch implementation that applies the per-word key reversal
-(M1), the whole-block reversal (M2), the tc26-Z S-box (M3), the round function
-(§3), and the 32-round Magma schedule (§4) MUST produce `4ee901e5c2d8ca3d`
-exactly, and `Decrypt(key, 4ee901e5c2d8ca3d)` MUST return `fedcba9876543210`.
+A correct implementation that applies M1 + M2 + the tc26-Z S-box + the §3 round
+function + the §4 schedule MUST produce `4ee901e5c2d8ca3d` and
+`Decrypt(key, 4ee901e5c2d8ca3d)` MUST return `fedcba9876543210`.
 
-### V2. Magma CBC mode (repo test, RFC 34.13-2015 style)
+### V2. Multi-block ECB (GOST R 34.13-2015 §A.2.1)
 
-`internal/gost/cipher_modes_test.go:198-214` — Magma in CBC over a multi-block
-plaintext; encrypt result and round-trip both asserted. Exercises the block
-core through `cipher.NewCBCEncrypter`/`Decrypter` over
-`gost341264.NewCipher(keyMag)`.
+Pinned by `TestECB_A21` in `magma/magma_test.go`. Exercises cipher-instance
+reuse across four 8-byte blocks in ECB mode, both encrypt and decrypt.
+
+```
+key:    ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
+pt:     92def06b3c130a59db54c704f8189d204a98fb2e67a8024c8912409b17b57e41
+ct:     2b073f0494f372a0de70e715d3556e4811d8d9e9eacfbc1e7c68260996c67efb
+```
+
+(Expected ciphertext derived against gost-engine 3.0.3:
+`openssl enc -magma-ecb -K <key> -nopad`.)
 
 ### V3. Magma ACPKM key meshing (engine etalon)
 
-`internal/gost/magma_acpkm_test.go:38-63` — ports the K2 etalon from
-`tmp/engine/test_gost89.c`. Meshing = encrypt the 32-byte `ACPKM_D_const`
+Meshing = encrypt the 32-byte `ACPKM_D_const`
 (`0x80,0x81,…,0x9f`, engine `tmp/engine/gost89.c:247-252`) block-by-block under
-the current key to derive the next key:
+the current key to derive the next key. Pinned in `ctracpkm/ctracpkm_test.go`.
 
 ```
 initialKey: 8899aabbccddeeff0011223344556677 fedcba98765432100123456789abcdef
@@ -344,7 +341,7 @@ wantK2:     863ea017842c3d372b18a85a28e2317d 74befc107720de0c9e8ab974abd00ca0
 
 Suite 0xC101 `GOST2012-MAGMA-MAGMAOMAC` is exercised by
 `TestTarantoolEE_Ping_GOST_Pure/GOST2012-MAGMA-MAGMAOMAC` against a live
-Tarantool-EE 3.5.0 server (`TODO.md:78-84`) — the strongest signal that the
+Tarantool-EE server in the dialer module — the strongest signal that the
 block core, CTR, OMAC, and ACPKM all match gost-engine.
 
 ### V5. gost-engine ground truth
@@ -396,194 +393,37 @@ Each step is independently testable. Steps marked "(core)" are the unchanged
 
 ## Conformance & fuzz testing
 
-Once your clean-room block cipher passes the §V1 KAT, prove it stays in lockstep
-with the references by **differential testing** against two oracles that share
-this primitive's exact byte shapes: the raw gogost shim
-`go.stargrave.org/gogost/v7/gost341264` (`NewCipher(key).Encrypt/Decrypt`,
-`cipher.go:33-92`) and the repo wrapper `internal/gost.MagmaEncrypt`/`MagmaDecrypt`
-(`primitives_gost.go:103-117`). Magma is a deterministic 32-byte-key / 8-byte-block
-permutation, so the fuzz target generates a random 32B key + 8B block, encrypts
-under all three impls, and fails on any divergence; it also asserts the
-round-trip identity `Decrypt(Encrypt(p)) == p` to catch decode-path bugs the
-forward-only oracle would miss. (Both oracles here are real Go APIs — no CLI
-shell-out is needed for the block cipher. The CTR / OMAC / ACPKM modes built on
-top *do* require the gost-engine CLI oracle from `CLAUDE.md`; see §V5 and the
-mode-parity note below.)
+The implementation is already complete in `magma/magma.go`. Correctness is
+established by three complementary test layers:
 
-Replace the placeholder alias `mynew` with your clean-room package. Its API must
-match this guide's surface exactly: `mynew.MagmaEncrypt(key, pt []byte) []byte`
-and `mynew.MagmaDecrypt(key, ct []byte) []byte`, both single-block, no S-box
-argument (delta M3).
+1. **In-package KATs and guards** (`magma/magma_test.go`, `magma/guard_test.go`):
+   - RFC 8891 Appendix A.3–A.4 single-block vector (V1).
+   - GOST R 34.13-2015 §A.2.1 multi-block ECB round-trip (V2).
+   - In-place `Encrypt(buf, buf)` / `Decrypt(buf, buf)` against V1.
+   - Panic-contract tests: wrong key length, short src/dst.
+   - 10 000-iteration random round-trip.
+   - S-box permutation check.
 
-### KAT — pinned RFC 8891 vector (V1)
+2. **Differential parity against the gogost reference** (`../gostcrypto-compat/parity/magma/`):
+   `FuzzMagmaDifferential` generates random keys + blocks and compares this
+   implementation byte-for-byte against `go.stargrave.org/gogost/v7/gost341264`.
+   This lives in the GPL-quarantined compat module (license boundary — it may not
+   move here), but runs as part of the parity gate and **passes**.
 
-```go
-//go:build gost
+3. **End-to-end suite interop** (TLS dialer module): the `GOST2012-MAGMA-MAGMAOMAC`
+   (0xC101) end-to-end tests against a live Tarantool EE server exercise the full
+   block→CTR→OMAC→ACPKM stack (strongest external signal).
 
-package yourpkg
-
-import (
-	"bytes"
-	"encoding/hex"
-	"testing"
-
-	"go.stargrave.org/gogost/v7/gost341264"
-
-	gostref "go.bigb.es/tlsdialer/internal/gost"
-	mynew "example.com/magma" // ← your clean-room impl
-)
-
-func mustHex(t *testing.T, s string) []byte {
-	t.Helper()
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatalf("bad hex %q: %v", s, err)
-	}
-	return b
-}
-
-func TestMagmaConformance(t *testing.T) {
-	// §V1: RFC 8891 Appendix A.3-A.4, also pinned in
-	// third_party/gogost/gost341264/cipher_test.go:28-46.
-	cases := []struct {
-		name           string
-		key, pt, ctWant string
-	}{
-		{
-			name:   "rfc8891-appendix-a",
-			key:    "ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
-			pt:     "fedcba9876543210",
-			ctWant: "4ee901e5c2d8ca3d",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			key, pt, want := mustHex(t, tc.key), mustHex(t, tc.pt), mustHex(t, tc.ctWant)
-
-			// clean-room impl under test
-			gotNew := mynew.MagmaEncrypt(key, pt)
-			if !bytes.Equal(gotNew, want) {
-				t.Fatalf("mynew encrypt = %x, want %x", gotNew, want)
-			}
-			if back := mynew.MagmaDecrypt(key, want); !bytes.Equal(back, pt) {
-				t.Fatalf("mynew decrypt = %x, want %x", back, pt)
-			}
-
-			// reference 1: repo wrapper internal/gost
-			if got := gostref.MagmaEncrypt(key, pt); !bytes.Equal(got, want) {
-				t.Fatalf("internal/gost encrypt = %x, want %x", got, want)
-			}
-
-			// reference 2: raw gogost gost341264 shim
-			c := gost341264.NewCipher(key)
-			gotRef := make([]byte, gost341264.BlockSize)
-			c.Encrypt(gotRef, pt)
-			if !bytes.Equal(gotRef, want) {
-				t.Fatalf("gogost encrypt = %x, want %x", gotRef, want)
-			}
-		})
-	}
-}
-```
-
-### Fuzz — differential vs both references
-
-```go
-//go:build gost
-
-package yourpkg
-
-import (
-	"bytes"
-	"testing"
-
-	"go.stargrave.org/gogost/v7/gost341264"
-
-	gostref "go.bigb.es/tlsdialer/internal/gost"
-	mynew "example.com/magma" // ← your clean-room impl
-)
-
-func FuzzMagmaConformance(f *testing.F) {
-	// Seed from the §V1 KAT input (key||plaintext = 40 bytes).
-	f.Add(mustHex(f.T(), // helper hoisted; or inline hex.DecodeString here
-		"ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"+
-			"fedcba9876543210"))
-
-	f.Fuzz(func(t *testing.T, raw []byte) {
-		// Normalize the random blob into Magma's fixed shapes:
-		// 32-byte key + 8-byte block. Skip undersized corpus entries.
-		if len(raw) < gost341264.KeySize+gost341264.BlockSize {
-			t.Skip()
-		}
-		key := raw[:gost341264.KeySize]
-		pt := raw[gost341264.KeySize : gost341264.KeySize+gost341264.BlockSize]
-
-		// clean-room impl under test
-		ctNew := mynew.MagmaEncrypt(key, pt)
-
-		// reference 1: repo wrapper
-		ctRepo := gostref.MagmaEncrypt(key, pt)
-		if !bytes.Equal(ctNew, ctRepo) {
-			t.Fatalf("encrypt mismatch vs internal/gost:\n key=%x pt=%x\n mynew=%x\n repo =%x",
-				key, pt, ctNew, ctRepo)
-		}
-
-		// reference 2: raw gogost
-		c := gost341264.NewCipher(key)
-		ctGo := make([]byte, gost341264.BlockSize)
-		c.Encrypt(ctGo, pt)
-		if !bytes.Equal(ctNew, ctGo) {
-			t.Fatalf("encrypt mismatch vs gogost:\n key=%x pt=%x\n mynew=%x\n gogost=%x",
-				key, pt, ctNew, ctGo)
-		}
-
-		// round-trip identity: Decrypt(Encrypt(p)) == p
-		if back := mynew.MagmaDecrypt(key, ctNew); !bytes.Equal(back, pt) {
-			t.Fatalf("round-trip failed:\n key=%x pt=%x\n back=%x", key, pt, back)
-		}
-	})
-}
-```
-
-> The fuzz seed reuses `mustHex` from the KAT file (same `package yourpkg`); if
-> you split the files differently, inline `hex.DecodeString` here instead. Use a
-> `*testing.F`-friendly decode (panic-on-error) — corpus seeds are trusted.
-
-**Mode parity (CTR / OMAC / ACPKM).** The block cipher above is fully covered by
-Go-API oracles, but the modes layered on it (§V2-V3) have **no gogost API that
-isolates them** — cross-check those against the gost-engine CLI from `CLAUDE.md`
-by shelling out to the oracle rather than importing a reference:
-
-```go
-// magmaCTROracle returns the engine's Magma-CTR keystream-xor of plain.
-// No gogost equivalent exists for the standalone mode; the engine CLI is
-// the ground truth (CLAUDE.md "CLI oracles for primitive cross-check").
-func magmaCTROracle(t *testing.T, keyHex, ivHex string, plain []byte) []byte {
-	t.Helper()
-	in := filepath.Join(t.TempDir(), "plain.bin")
-	if err := os.WriteFile(in, plain, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(
-		"/opt/homebrew/opt/openssl@3/bin/openssl", "enc",
-		"-engine", "gost", "-magma-ctr",
-		"-K", keyHex, "-iv", ivHex, "-in", in,
-	)
-	cmd.Env = append(os.Environ(),
-		"OPENSSL_CONF=/opt/homebrew/etc/gost/gost-engine.cnf")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("engine magma-ctr oracle: %v", err)
-	}
-	return out
-}
-```
+**Mode parity (CTR / OMAC / ACPKM).** The block cipher itself is covered by the
+Go-API parity oracle above. The CTR/OMAC/ACPKM modes built on top are anchored to
+gost-engine via CLI cross-checks (`OPENSSL_CONF=... openssl enc -magma-ctr ...`)
+documented in `CLAUDE.md` and exercised in `ctracpkm/` and `omac/` test suites.
 
 ### Run
 
 ```sh
-go test -tags gost -run TestMagmaConformance ./yourpkg/
-go test -tags gost -fuzz=FuzzMagmaConformance -fuzztime=30s ./yourpkg/
+CGO_ENABLED=0 go test ./magma/
+( cd ../gostcrypto-compat && go test ./parity/magma/ )
 ```
 
 
@@ -614,26 +454,20 @@ go test -tags gost -fuzz=FuzzMagmaConformance -fuzztime=30s ./yourpkg/
 
 **Source citations**
 
-- `third_party/gogost/gost341264/cipher.go:23-92` — constants, per-word key
-  reversal (M1), whole-block reversal (M2), fixed tc26-Z S-box (M3),
-  Encrypt/Decrypt. (gogost, GPL-3.0 — describe, do not copy.)
-- `third_party/gogost/gost341264/cipher_test.go:28-46` — RFC 8891 KAT (V1).
-- `third_party/gogost/gost28147/sbox.go:72-81` — tc26-Z S-box bytes.
-- `third_party/gogost/gost28147/cipher.go:60-123` — the 28147-89 core
-  (key schedule, pack/unpack, round, `SeqEncrypt`/`SeqDecrypt`).
-- `internal/gost/primitives_gost.go:99-117` — `MagmaEncrypt`/`MagmaDecrypt`.
-- `internal/gost/exports_gost.go:34,74-76` — `MagmaBlockSize`,
-  `NewMagmaCipher`.
-- `internal/gost/magma_acpkm_test.go:38-63` — ACPKM K2 etalon (V3).
-- `internal/gost/cipher_modes_test.go:198-214` — Magma CBC (V2).
-- `tls/internal/suites/gost_suites.go:124-133,238-249` — suite 0xC101 spec.
+- `magma/magma.go` — the clean-room implementation (constants, `sboxTC26Z`,
+  per-word key reversal M1, whole-block reversal M2, fixed tc26-Z S-box M3,
+  Encrypt/Decrypt, round function `g`/`t`).
+- `magma/magma_test.go` — RFC 8891 A.3–A.4 KAT (V1), GOST R 34.13-2015
+  §A.2.1 multi-block ECB (V2), random round-trip, S-box permutation check.
+- `magma/guard_test.go` — in-place Encrypt/Decrypt and panic-contract tests.
+- `../gostcrypto-compat/parity/magma/` — differential fuzz vs the gogost
+  reference (GPL-quarantined; not in this module's CI).
 - `tmp/engine/gost89.c:214-238` — engine tc26-Z S-box (M4 cross-check).
 - `tmp/engine/gost89.c:332-383` — engine `magmacrypt`/`magmadecrypt`
   (block reversal M2, 32-round structure).
 - `tmp/engine/gost89.c:583-592` — engine `magma_key` (per-word key reversal M1).
 - `tmp/engine/gost89.c:247-252` — `ACPKM_D_const`.
 - `../gost28147/gost28147-cipher.md` — the 28147-89 core (deltas D1–D8).
-- `TODO.md:9,78-84` — S-box row-order divergence (hash, not Magma) and the
-  0xC101 interop status.
+- `TODO.md:9` — S-box row-order divergence note (hash context, not Magma).
 ```
 

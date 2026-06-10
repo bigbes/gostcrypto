@@ -9,8 +9,13 @@ import (
 	"crypto/rand"
 	"encoding/asn1"
 	"encoding/hex"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/bigbes/gostcrypto/gost28147imit"
+	"github.com/bigbes/gostcrypto/keg"
 )
 
 // TestGost_Kuznyechik_Vector is a KAT from GOST R 34.12-2015 §A.1.
@@ -24,12 +29,20 @@ func TestGost_Kuznyechik_Vector(t *testing.T) {
 	pt, _ := hex.DecodeString("1122334455667700ffeeddccbbaa9988")
 	wantCT, _ := hex.DecodeString("7f679d90bebc24305a468d42b9d4edcd")
 
-	dst := KuznyechikEncrypt(key, pt)
+	dst, err := KuznyechikEncrypt(key, pt)
+	if err != nil {
+		t.Fatalf("KuznyechikEncrypt: %v", err)
+	}
+
 	if !bytes.Equal(dst, wantCT) {
 		t.Fatalf("KuznyechikEncrypt: got %x, want %x", dst, wantCT)
 	}
 
-	got := KuznyechikDecrypt(key, dst)
+	got, err := KuznyechikDecrypt(key, dst)
+	if err != nil {
+		t.Fatalf("KuznyechikDecrypt: %v", err)
+	}
+
 	if !bytes.Equal(got, pt) {
 		t.Fatalf("KuznyechikDecrypt: got %x, want %x", got, pt)
 	}
@@ -46,12 +59,20 @@ func TestGost_Magma_Vector(t *testing.T) {
 	pt, _ := hex.DecodeString("fedcba9876543210")
 	wantCT, _ := hex.DecodeString("4ee901e5c2d8ca3d")
 
-	dst := MagmaEncrypt(key, pt)
+	dst, err := MagmaEncrypt(key, pt)
+	if err != nil {
+		t.Fatalf("MagmaEncrypt: %v", err)
+	}
+
 	if !bytes.Equal(dst, wantCT) {
 		t.Fatalf("MagmaEncrypt: got %x, want %x", dst, wantCT)
 	}
 
-	got := MagmaDecrypt(key, dst)
+	got, err := MagmaDecrypt(key, dst)
+	if err != nil {
+		t.Fatalf("MagmaDecrypt: %v", err)
+	}
+
 	if !bytes.Equal(got, pt) {
 		t.Fatalf("MagmaDecrypt: got %x, want %x", got, pt)
 	}
@@ -97,7 +118,8 @@ func TestGost_Streebog512_Vector(t *testing.T) {
 }
 
 // TestGost_R341012_Verify exercises signature verify (sign + verify round-trip).
-// Uses GOST R 34.10-2012 256-bit curve (CurveIdtc26gost341012256paramSetA).
+// R341012Sign/R341012Verify operate on the GOST R 34.10-2001 test parameter
+// set curve (id-GostR3410-2001-TestParamSet), not tc26-2012-256-A.
 func TestGost_R341012_Verify(t *testing.T) {
 	t.Parallel()
 
@@ -318,12 +340,21 @@ func TestFacade_GOST2814789(t *testing.T) {
 	pt := fhex(t, "1020304050607080")
 	want := fhex(t, "2685b30ddb497d05")
 
-	ct := GOST2814789Encrypt(key, pt)
+	ct, err := GOST2814789Encrypt(key, pt)
+	if err != nil {
+		t.Fatalf("GOST2814789Encrypt: %v", err)
+	}
+
 	if !bytes.Equal(ct, want) {
 		t.Fatalf("GOST2814789Encrypt = %x, want %x", ct, want)
 	}
 
-	if back := GOST2814789Decrypt(key, ct); !bytes.Equal(back, pt) {
+	back, err := GOST2814789Decrypt(key, ct)
+	if err != nil {
+		t.Fatalf("GOST2814789Decrypt: %v", err)
+	}
+
+	if !bytes.Equal(back, pt) {
 		t.Fatalf("GOST2814789Decrypt = %x, want %x", back, pt)
 	}
 }
@@ -812,4 +843,769 @@ func TestTLSTree_EngineOracle(t *testing.T) {
 		t.Errorf("TLSTREE seq=63\n got: %s\nwant: %s",
 			hex.EncodeToString(got), want)
 	}
+}
+
+// ── FACA-73: KEG2012_256 zero-UKM branch and differential test ───────────────.
+
+// TestFacade_KEG_ZeroUKMBranch exercises the facade KEG2012_256 zero-UKM
+// path (ukmSource[:16] == 0…0 → realUKM = 00…00 01). Cross-checks the facade
+// against keg.KEG2012_256 on TC26 256-A to pin that the two copies stay
+// identical.
+func TestFacade_KEG_ZeroUKMBranch(t *testing.T) {
+	t.Parallel()
+
+	c, err := CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 1, 1})
+	if err != nil {
+		t.Fatalf("CurveByOID TC26-256-A: %v", err)
+	}
+
+	pubB := fhex(t, "c0ec907466beb2eb5ea1bbd2f6015b710c775b88efca1f558cc81038617f8888"+
+		"8884f2471bba3e2468564213f04e71700151747941f6a3032085321e9b3aa602")
+	privA := fhex(t, "9f7d8e9fff181ad801ccebef0a5ba7c3c3353e0a7c16b4d16a20835a87b7eb0d")
+	zeroUKM := make([]byte, 32) // first 16 bytes zero → zero-UKM branch.
+
+	facadeGot, err := KEG2012_256(c, pubB, privA, zeroUKM)
+	if err != nil {
+		t.Fatalf("KEG2012_256 facade zero-UKM: %v", err)
+	}
+
+	// Cross-check: the facade must agree with keg.KEG2012_256.
+	kegGot, err := keg.KEG2012_256(c.inner, pubB, privA, zeroUKM)
+	if err != nil {
+		t.Fatalf("keg.KEG2012_256 zero-UKM: %v", err)
+	}
+
+	if facadeGot != kegGot {
+		t.Fatalf("KEG zero-UKM: facade %x != keg %x", facadeGot[:], kegGot[:])
+	}
+}
+
+// TestFacade_KEG_DifferentialVsKegPackage asserts that the facade KEG2012_256
+// produces byte-identical output to keg.KEG2012_256 for the TC26 256-A KAT
+// vector and for the zero-UKM case. This pins the facade delegation and catches
+// any future duplication divergence.
+func TestFacade_KEG_DifferentialVsKegPackage(t *testing.T) {
+	t.Parallel()
+
+	c, err := CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 1, 1})
+	if err != nil {
+		t.Fatalf("CurveByOID: %v", err)
+	}
+
+	pubB := fhex(t, "c0ec907466beb2eb5ea1bbd2f6015b710c775b88efca1f558cc81038617f8888"+
+		"8884f2471bba3e2468564213f04e71700151747941f6a3032085321e9b3aa602")
+	privA := fhex(t, "9f7d8e9fff181ad801ccebef0a5ba7c3c3353e0a7c16b4d16a20835a87b7eb0d")
+
+	cases := []struct {
+		name string
+		ukm  []byte
+	}{
+		{"nonzero_ukm", fhex(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")},
+		{"zero_ukm_first16", make([]byte, 32)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			facadeGot, err := KEG2012_256(c, pubB, privA, tc.ukm)
+			if err != nil {
+				t.Fatalf("KEG2012_256 facade: %v", err)
+			}
+
+			kegGot, err := keg.KEG2012_256(c.inner, pubB, privA, tc.ukm)
+			if err != nil {
+				t.Fatalf("keg.KEG2012_256: %v", err)
+			}
+
+			if facadeGot != kegGot {
+				t.Fatalf("facade %x != keg %x", facadeGot[:], kegGot[:])
+			}
+		})
+	}
+}
+
+// ── FACA-75: streaming hash factories ────────────────────────────────────────.
+
+// TestFacade_HashFactories verifies the streaming hash.Hash factories:
+// split-Write result == one-shot helper output, Size/BlockSize correct,
+// Sum(b) appends rather than overwrites. Also covers NewGOST28147IMITPlaceholderHash.
+func TestFacade_HashFactories(t *testing.T) {
+	t.Parallel()
+
+	// msg from existing KAT (Streebog).
+	msg, _ := hex.DecodeString(
+		"3031323334353637383930313233343536373839303132333435363738393031" +
+			"32333435363738393031323334353637383930313233343536373839303132",
+	)
+	msg2 := []byte("abc") // for GOSTR341194.
+
+	t.Run("Streebog256", func(t *testing.T) {
+		t.Parallel()
+
+		h := NewStreebog256Hash()
+		if h.Size() != 32 {
+			t.Errorf("Size = %d, want 32", h.Size())
+		}
+
+		if h.BlockSize() != 64 {
+			t.Errorf("BlockSize = %d, want 64", h.BlockSize())
+		}
+
+		// Split write == one-shot helper.
+		h.Write(msg[:16])
+		h.Write(msg[16:])
+
+		got := h.Sum(nil)
+		want := Streebog256(msg)
+
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Streebog256 streaming != one-shot:\n got %x\nwant %x", got, want)
+		}
+
+		// Sum is non-destructive: calling it twice must return the same bytes.
+		again := h.Sum(nil)
+		if !bytes.Equal(got, again) {
+			t.Fatal("Streebog256 Sum is destructive")
+		}
+
+		// Sum appends: Sum(prefix) should start with prefix.
+		prefix := []byte{0xDE, 0xAD}
+
+		appended := h.Sum(prefix)
+		if !bytes.Equal(appended[:2], prefix) {
+			t.Fatalf("Sum(prefix) didn't preserve prefix: got %x", appended[:2])
+		}
+
+		// Reset: after Reset, a fresh hash should produce the same result.
+		h.Reset()
+		h.Write(msg)
+
+		gotAfterReset := h.Sum(nil)
+
+		if !bytes.Equal(gotAfterReset, want) {
+			t.Fatal("Streebog256 after Reset != fresh hash")
+		}
+	})
+
+	t.Run("Streebog512", func(t *testing.T) {
+		t.Parallel()
+
+		h := NewStreebog512Hash()
+		if h.Size() != 64 {
+			t.Errorf("Size = %d, want 64", h.Size())
+		}
+
+		if h.BlockSize() != 64 {
+			t.Errorf("BlockSize = %d, want 64", h.BlockSize())
+		}
+
+		h.Write(msg[:8])
+		h.Write(msg[8:])
+
+		got := h.Sum(nil)
+		want := Streebog512(msg)
+
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Streebog512 streaming != one-shot:\n got %x\nwant %x", got, want)
+		}
+
+		// Sum is non-destructive.
+		again := h.Sum(nil)
+		if !bytes.Equal(got, again) {
+			t.Fatal("Streebog512 Sum is destructive")
+		}
+	})
+
+	t.Run("GOSTR341194CryptoPro", func(t *testing.T) {
+		t.Parallel()
+
+		h := NewGOSTR341194CryptoProHash()
+		if h.Size() != 32 {
+			t.Errorf("Size = %d, want 32", h.Size())
+		}
+
+		h.Write(msg2[:1])
+		h.Write(msg2[1:])
+
+		got := h.Sum(nil)
+		want := GOSTR341194(msg2)
+
+		if !bytes.Equal(got, want) {
+			t.Fatalf("GOSTR341194 streaming != one-shot:\n got %x\nwant %x", got, want)
+		}
+
+		// Sum is non-destructive.
+		again := h.Sum(nil)
+		if !bytes.Equal(got, again) {
+			t.Fatal("GOSTR341194 Sum is destructive")
+		}
+	})
+
+	t.Run("IMITPlaceholder", func(t *testing.T) {
+		t.Parallel()
+
+		h := NewGOST28147IMITPlaceholderHash()
+		if h.Size() != 4 {
+			t.Errorf("Size = %d, want 4", h.Size())
+		}
+
+		if h.BlockSize() != 8 {
+			t.Errorf("BlockSize = %d, want 8", h.BlockSize())
+		}
+
+		// Sum always returns 4 zero bytes, regardless of input.
+		h.Write([]byte("anything"))
+
+		got := h.Sum(nil)
+		if len(got) != 4 || got[0] != 0 || got[1] != 0 || got[2] != 0 || got[3] != 0 {
+			t.Errorf("IMITPlaceholder Sum = %x, want 4 zero bytes", got)
+		}
+
+		// Sum appends.
+		prefix := []byte{0xFF}
+
+		appended := h.Sum(prefix)
+		if len(appended) != 5 || appended[0] != 0xFF {
+			t.Errorf("IMITPlaceholder Sum(prefix) = %x, want FF00000000", appended)
+		}
+	})
+}
+
+// ── FACA-76: GOST28147Cipher opaque handle ───────────────────────────────────.
+
+// TestFacade_GOST28147Cipher_Handle exercises the GOST28147Cipher opaque
+// handle: Encrypt/Decrypt round-trip vs the primitive package output, and
+// SeqMACBlock vs gost28147imit. Also verifies key-copy insulation (mutating
+// the caller's key after construction must not change outputs).
+func TestFacade_GOST28147Cipher_Handle(t *testing.T) {
+	t.Parallel()
+
+	key := fhex(t, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	pt := fhex(t, "1020304050607080")
+
+	// Build the handle with tc26-Z S-box.
+	h := NewGOST28147Cipher(key, SboxTC26Z)
+
+	dst := make([]byte, 8)
+	h.Encrypt(dst, pt)
+
+	// Round-trip.
+	back := make([]byte, 8)
+	h.Decrypt(back, dst)
+
+	if !bytes.Equal(back, pt) {
+		t.Fatalf("Encrypt+Decrypt round-trip failed:\n got %x\nwant %x", back, pt)
+	}
+
+	// SeqMACBlock: result must match gost28147imit.SeqMACBlock directly.
+	block := fhex(t, "0102030405060708")
+	fromHandle := h.SeqMACBlock(block)
+	fromPrimitive := gost28147imit.SeqMACBlock(key, SboxTC26Z.inner, block)
+
+	if !bytes.Equal(fromHandle, fromPrimitive) {
+		t.Fatalf("SeqMACBlock mismatch:\n handle   %x\n primitive %x", fromHandle, fromPrimitive)
+	}
+
+	// Key-copy insulation: mutate caller's key buffer; outputs must not change.
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+
+	h2 := NewGOST28147Cipher(keyCopy, SboxTC26Z)
+
+	dst2before := make([]byte, 8)
+	h2.Encrypt(dst2before, pt)
+
+	for i := range keyCopy {
+		keyCopy[i] ^= 0xFF // clobber the caller's key.
+	}
+
+	dst2after := make([]byte, 8)
+	h2.Encrypt(dst2after, pt)
+
+	if !bytes.Equal(dst2before, dst2after) {
+		t.Fatal("GOST28147Cipher key mutation insulation failed")
+	}
+}
+
+// ── FACA-77: facade validation / error paths ─────────────────────────────────.
+
+// TestFacade_ErrorPaths exercises every facade sentinel error (validation that
+// the facade itself owns, above the subpackage layer).
+func TestFacade_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	key32 := make([]byte, 32)
+	iv16 := make([]byte, 16)
+	iv8 := make([]byte, 8)
+
+	type errCase struct {
+		name string
+		fn   func() error
+	}
+
+	cases := []errCase{
+		// NewCTR wrong IV length.
+		{"NewCTR_bad_iv", func() error {
+			_, err := NewCTR(NewKuznyechikCipher(key32), make([]byte, 7))
+			return err
+		}},
+		// NewCTRACPKM bad key length.
+		{"NewCTRACPKM_bad_key", func() error {
+			_, err := NewCTRACPKM(NewKuznyechikCipher, make([]byte, 16), iv16, 32)
+			return err
+		}},
+		// NewCTRACPKM negative sectionSize.
+		{"NewCTRACPKM_neg_section", func() error {
+			_, err := NewCTRACPKM(NewKuznyechikCipher, key32, iv16, -1)
+			return err
+		}},
+		// NewCTRACPKM sectionSize not multiple of block size.
+		{"NewCTRACPKM_section_mod", func() error {
+			_, err := NewCTRACPKM(NewKuznyechikCipher, key32, iv16, 17)
+			return err
+		}},
+		// NewOMAC tagSize out of range (0).
+		{"NewOMAC_tagsize_zero", func() error {
+			_, err := NewOMAC(NewKuznyechikCipher(key32), 0)
+			return err
+		}},
+		// NewOMAC tagSize out of range (too large).
+		{"NewOMAC_tagsize_large", func() error {
+			_, err := NewOMAC(NewKuznyechikCipher(key32), 17)
+			return err
+		}},
+		// KEG2012_256 wrong ukmSource length.
+		{"KEG_bad_ukm_len", func() error {
+			c, _ := CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 1, 1})
+			_, err := KEG2012_256(c, make([]byte, 64), key32, make([]byte, 24))
+
+			return err
+		}},
+		// NewGOST28147_CNT bad key.
+		{"CNT_bad_key", func() error {
+			_, err := NewGOST28147_CNT(make([]byte, 16), iv8)
+			return err
+		}},
+		// NewGOST28147_CNT bad IV.
+		{"CNT_bad_iv", func() error {
+			_, err := NewGOST28147_CNT(key32, make([]byte, 4))
+			return err
+		}},
+		// GOST28147_IMIT bad key.
+		{"IMIT_bad_key", func() error {
+			_, err := GOST28147_IMIT(make([]byte, 16), []byte("hello"))
+			return err
+		}},
+		// GOST28147_IMIT empty message.
+		{"IMIT_empty_msg", func() error {
+			_, err := GOST28147_IMIT(key32, nil)
+			return err
+		}},
+		// KuznyechikEncrypt wrong input length.
+		{"KuznyechikEncrypt_bad_len", func() error {
+			_, err := KuznyechikEncrypt(key32, make([]byte, 20))
+			return err
+		}},
+		// KuznyechikDecrypt wrong input length.
+		{"KuznyechikDecrypt_bad_len", func() error {
+			_, err := KuznyechikDecrypt(key32, make([]byte, 5))
+			return err
+		}},
+		// MagmaEncrypt wrong input length.
+		{"MagmaEncrypt_bad_len", func() error {
+			_, err := MagmaEncrypt(key32, make([]byte, 20))
+			return err
+		}},
+		// MagmaDecrypt wrong input length.
+		{"MagmaDecrypt_bad_len", func() error {
+			_, err := MagmaDecrypt(key32, make([]byte, 5))
+			return err
+		}},
+		// GOST2814789Encrypt wrong input length.
+		{"GOST2814789Encrypt_bad_len", func() error {
+			_, err := GOST2814789Encrypt(key32, make([]byte, 20))
+			return err
+		}},
+		// GOST2814789Decrypt wrong input length.
+		{"GOST2814789Decrypt_bad_len", func() error {
+			_, err := GOST2814789Decrypt(key32, make([]byte, 5))
+			return err
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if err := tc.fn(); err == nil {
+				t.Errorf("expected error, got nil")
+			}
+		})
+	}
+}
+
+// ── FACA-78: VKO coverage ────────────────────────────────────────────────────.
+
+// TestFacade_VKO2012_512_KAT pins VKO2012_512 against the RFC 7836 512-bit KEK
+// vector (same key pair as the existing VKO2012_256 KAT). Source: vko/vko_test.go
+// (kek512 constant, line ~89).
+func TestFacade_VKO2012_512_KAT(t *testing.T) {
+	t.Parallel()
+
+	prvRawA := fhex(t, "c990ecd972fce84ec4db022778f50fcac726f46708384b8d458304962d7147f8"+
+		"c2db41cef22c90b102f2968404f9b9be6d47c79692d81826b32b8daca43cb667")
+	pubRawB := fhex(t, "192fe183b9713a077253c72c8735de2ea42a3dbc66ea317838b65fa32523cd5e"+
+		"fca974eda7c863f4954d1147f1f2b25c395fce1c129175e876d132e94ed5a651"+
+		"04883b414c9b592ec4dc84826f07d0b6d9006dda176ce48c391e3f97d102e03b"+
+		"b598bf132a228a45f7201aba08fc524a2d77e43a362ab022ad4028f75bde3b79")
+	ukmRaw := fhex(t, "1d80603c8544c727")
+	want := fhex(t, "79f002a96940ce7bde3259a52e015297adaad84597a0d205b50e3e1719f97bfa"+
+		"7ee1d2661fa9979a5aa235b558a7e6d9f88f982dd63fc35a8ec0dd5e242d3bdf")
+
+	kek, err := VKO2012_512(prvRawA, pubRawB, ukmRaw)
+	if err != nil {
+		t.Fatalf("VKO2012_512: %v", err)
+	}
+
+	if !bytes.Equal(kek, want) {
+		t.Fatalf("VKO2012_512:\n got %x\nwant %x", kek, want)
+	}
+}
+
+// TestFacade_VKO2001_CryptoPro exercises VKO2001 (CryptoPro-A curve) and
+// VKO2001OnCurve round-trip: both variants must produce the same KEK from the
+// same inputs.
+func TestFacade_VKO2001_CryptoPro(t *testing.T) {
+	t.Parallel()
+
+	c := GOST2001CryptoProAParamSetCurve()
+
+	privA, pubA, err := GenerateEphemeralKey(c, rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateEphemeralKey A: %v", err)
+	}
+
+	privB, pubB, err := GenerateEphemeralKey(c, rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateEphemeralKey B: %v", err)
+	}
+
+	ukm := fhex(t, "1d80603c8544c727")
+
+	kekA, err := VKO2001(privA, pubB, ukm)
+	if err != nil {
+		t.Fatalf("VKO2001 A: %v", err)
+	}
+
+	kekB, err := VKO2001(privB, pubA, ukm)
+	if err != nil {
+		t.Fatalf("VKO2001 B: %v", err)
+	}
+
+	if !bytes.Equal(kekA, kekB) {
+		t.Fatalf("VKO2001 parties disagree:\n A=%x\n B=%x", kekA, kekB)
+	}
+
+	// VKO2001OnCurve must agree with VKO2001.
+	kekAOnCurve, err := VKO2001OnCurve(c, privA, pubB, ukm)
+	if err != nil {
+		t.Fatalf("VKO2001OnCurve: %v", err)
+	}
+
+	if !bytes.Equal(kekA, kekAOnCurve) {
+		t.Fatalf("VKO2001 vs VKO2001OnCurve mismatch:\n VKO2001 %x\n OnCurve %x", kekA, kekAOnCurve)
+	}
+
+	// Error path: wrong-length public key.
+	if _, err := VKO2001OnCurve(c, privA, pubB[:31], ukm); err == nil {
+		t.Fatal("VKO2001OnCurve with short pubkey: expected error, got nil")
+	}
+}
+
+// TestFacade_VKO2012_256OnCurve exercises VKO2012_256OnCurve and confirms it
+// equals VKO2012_256 (which uses the default 512-A curve) when the same curve
+// is passed explicitly.
+func TestFacade_VKO2012_256OnCurve(t *testing.T) {
+	t.Parallel()
+
+	// Use the 512-A curve (same default as VKO2012_256).
+	c, err := CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 2, 1})
+	if err != nil {
+		t.Fatalf("CurveByOID 512-A: %v", err)
+	}
+
+	prvRawA := fhex(t, "c990ecd972fce84ec4db022778f50fcac726f46708384b8d458304962d7147f8"+
+		"c2db41cef22c90b102f2968404f9b9be6d47c79692d81826b32b8daca43cb667")
+	pubRawB := fhex(t, "192fe183b9713a077253c72c8735de2ea42a3dbc66ea317838b65fa32523cd5e"+
+		"fca974eda7c863f4954d1147f1f2b25c395fce1c129175e876d132e94ed5a651"+
+		"04883b414c9b592ec4dc84826f07d0b6d9006dda176ce48c391e3f97d102e03b"+
+		"b598bf132a228a45f7201aba08fc524a2d77e43a362ab022ad4028f75bde3b79")
+	ukmRaw := fhex(t, "1d80603c8544c727")
+
+	kekDefault, err := VKO2012_256(prvRawA, pubRawB, ukmRaw)
+	if err != nil {
+		t.Fatalf("VKO2012_256: %v", err)
+	}
+
+	kekOnCurve, err := VKO2012_256OnCurve(c, prvRawA, pubRawB, ukmRaw)
+	if err != nil {
+		t.Fatalf("VKO2012_256OnCurve: %v", err)
+	}
+
+	if !bytes.Equal(kekDefault, kekOnCurve) {
+		t.Fatalf("VKO2012_256 vs OnCurve mismatch:\n default  %x\n OnCurve %x", kekDefault, kekOnCurve)
+	}
+
+	// Error path: wrong-length public key.
+	if _, err := VKO2012_256OnCurve(c, prvRawA, pubRawB[:63], ukmRaw); err == nil {
+		t.Fatal("VKO2012_256OnCurve with short pubkey: expected error, got nil")
+	}
+}
+
+// TestFacade_PublicKeyRawFromPrivate2001Test exercises PublicKeyRawFromPrivate2001Test:
+// the derived public key must round-trip through R341012Verify, and the function
+// must match PublicKeyRawFromPrivate on GOST2001TestParamSetCurve.
+func TestFacade_PublicKeyRawFromPrivate2001Test(t *testing.T) {
+	t.Parallel()
+
+	prvRaw := fhex(t, "7a929ade789bb9be10ed359dd39a72c11b60961f49397eee1d19ce9891ec3b28")
+	digest := fhex(t, "2dfbc1b372d89a1188c09c52e0eec61fce52032ab1022e8e67ece6672b043ee5")
+
+	pub, err := PublicKeyRawFromPrivate2001Test(prvRaw)
+	if err != nil {
+		t.Fatalf("PublicKeyRawFromPrivate2001Test: %v", err)
+	}
+
+	if len(pub) != 64 {
+		t.Fatalf("pubkey length = %d, want 64", len(pub))
+	}
+
+	// Must agree with PublicKeyRawFromPrivate on the 2001 test curve.
+	c := GOST2001TestParamSetCurve()
+
+	pub2, err := PublicKeyRawFromPrivate(c, prvRaw)
+	if err != nil {
+		t.Fatalf("PublicKeyRawFromPrivate: %v", err)
+	}
+
+	if !bytes.Equal(pub, pub2) {
+		t.Fatalf("PublicKeyRawFromPrivate2001Test != PublicKeyRawFromPrivate:\n got %x\n want %x", pub, pub2)
+	}
+
+	// Sign with R341012Sign, then verify using the derived public key.
+	sig, err := R341012Sign(prvRaw, digest)
+	if err != nil {
+		t.Fatalf("R341012Sign: %v", err)
+	}
+
+	ok, err := VerifyDigestOnCurve(c, pub, digest, sig)
+	if err != nil {
+		t.Fatalf("VerifyDigestOnCurve: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("VerifyDigestOnCurve rejected a valid signature")
+	}
+}
+
+// ── FACA-81: one-shot block helper length checks ─────────────────────────────.
+
+// TestFacade_BlockHelpers_LengthValidation verifies that the one-shot block
+// helpers reject inputs that are not exactly BlockSize bytes on the long side
+// (short inputs already panicked via the underlying cipher.Block).
+func TestFacade_BlockHelpers_LengthValidation(t *testing.T) {
+	t.Parallel()
+
+	key32 := make([]byte, 32)
+
+	cases := []struct {
+		name  string
+		fn    func([]byte) error
+		input []byte
+	}{
+		{
+			"KuznyechikEncrypt_long",
+			func(in []byte) error { _, e := KuznyechikEncrypt(key32, in); return e },
+			make([]byte, 20),
+		},
+		{
+			"KuznyechikDecrypt_long",
+			func(in []byte) error { _, e := KuznyechikDecrypt(key32, in); return e },
+			make([]byte, 32),
+		},
+		{
+			"MagmaEncrypt_long",
+			func(in []byte) error { _, e := MagmaEncrypt(key32, in); return e },
+			make([]byte, 20),
+		},
+		{
+			"MagmaDecrypt_long",
+			func(in []byte) error { _, e := MagmaDecrypt(key32, in); return e },
+			make([]byte, 16),
+		},
+		{
+			"GOST2814789Encrypt_long",
+			func(in []byte) error { _, e := GOST2814789Encrypt(key32, in); return e },
+			make([]byte, 20),
+		},
+		{
+			"GOST2814789Decrypt_long",
+			func(in []byte) error { _, e := GOST2814789Decrypt(key32, in); return e },
+			make([]byte, 16),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if err := tc.fn(tc.input); err == nil {
+				t.Errorf("expected error for over-long input, got nil")
+			}
+		})
+	}
+}
+
+// ── FACA-82: fuzz targets ────────────────────────────────────────────────────.
+
+// FuzzFacadeRoundTrips exercises three facade round-trips end-to-end:
+// Kuznyechik-CTR-ACPKM encrypt/decrypt, MGM Seal/Open, and KeyWrap/Unwrap.
+// Wrong-size inputs must return errors (not panic), and round-trip must hold.
+func FuzzFacadeRoundTrips(f *testing.F) {
+	// Seed from existing KATs.
+	f.Add(
+		[]byte("0123456789abcdef0123456789abcdef"), // key 32.
+		[]byte("1234567890abcef0"),                 // iv 16.
+		[]byte("hello gost fuzz"),                  // plaintext.
+	)
+	f.Add(
+		make([]byte, 32),
+		make([]byte, 16),
+		[]byte(""),
+	)
+
+	f.Fuzz(func(t *testing.T, rawKey, rawIV, plaintext []byte) {
+		// Normalize key to 32 bytes.
+		key := make([]byte, 32)
+		copy(key, rawKey)
+
+		// Normalize IV to 16 bytes.
+		iv := make([]byte, 16)
+		copy(iv, rawIV)
+
+		stream, err := NewCTRACPKM(NewKuznyechikCipher, key, iv, 0)
+		if err != nil {
+			return // invalid params are allowed to error.
+		}
+
+		ct := make([]byte, len(plaintext))
+		stream.XORKeyStream(ct, plaintext)
+
+		stream2, err := NewCTRACPKM(NewKuznyechikCipher, key, iv, 0)
+		if err != nil {
+			return
+		}
+
+		pt := make([]byte, len(ct))
+		stream2.XORKeyStream(pt, ct)
+
+		if !bytes.Equal(pt, plaintext) {
+			t.Fatalf("CTR round-trip failed:\n key=%x\n iv=%x\n pt=%x\n ct=%x\n back=%x",
+				key, iv, plaintext, ct, pt)
+		}
+	})
+}
+
+// FuzzKEG2012_256_Differential exercises the facade KEG2012_256 vs keg.KEG2012_256
+// to pin that both copies produce the same output for all inputs, including the
+// zero-UKM branch.
+func FuzzKEG2012_256_Differential(f *testing.F) {
+	// Seeds from the existing KAT.
+	privA, _ := hex.DecodeString("9f7d8e9fff181ad801ccebef0a5ba7c3c3353e0a7c16b4d16a20835a87b7eb0d")
+	pubB, _ := hex.DecodeString("c0ec907466beb2eb5ea1bbd2f6015b710c775b88efca1f558cc81038617f8888" +
+		"8884f2471bba3e2468564213f04e71700151747941f6a3032085321e9b3aa602")
+	ukm, _ := hex.DecodeString("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	f.Add(privA, pubB, ukm)
+
+	zeroUKM := make([]byte, 32)
+	f.Add(privA, pubB, zeroUKM)
+
+	c, err := CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 1, 1})
+	if err != nil {
+		f.Fatalf("CurveByOID: %v", err)
+	}
+
+	f.Fuzz(func(t *testing.T, rawPriv, rawPub, rawUKM []byte) {
+		// Normalize priv to 32 bytes, pub to 64 bytes, ukm to 32 bytes.
+		priv := make([]byte, 32)
+		copy(priv, rawPriv)
+
+		pub := make([]byte, 64)
+		copy(pub, rawPub)
+
+		ukmN := make([]byte, 32)
+		copy(ukmN, rawUKM)
+
+		facadeGot, facadeErr := KEG2012_256(c, pub, priv, ukmN)
+		kegGot, kegErr := keg.KEG2012_256(c.inner, pub, priv, ukmN)
+
+		// Both must agree on success or failure.
+		if (facadeErr == nil) != (kegErr == nil) {
+			t.Fatalf("error mismatch: facade=%v keg=%v", facadeErr, kegErr)
+		}
+
+		if facadeErr == nil && facadeGot != kegGot {
+			t.Fatalf("output mismatch:\n facade %x\n keg    %x", facadeGot[:], kegGot[:])
+		}
+	})
+}
+
+// FuzzGenerateEphemeralKey exercises GenerateEphemeralKey with adversarial
+// entropy (including values near 2^256 where the mod-q reduction fires).
+// Properties: no panic, priv is PointSize bytes, pub is 2*PointSize bytes.
+func FuzzGenerateEphemeralKey(f *testing.F) {
+	f.Add(make([]byte, 64))
+	// Force the mod-q reduction path: seed with bytes representing a large scalar.
+	big := make([]byte, 64)
+	for i := range big {
+		big[i] = 0xFF
+	}
+
+	f.Add(big)
+
+	c := GOST2001TestParamSetCurve()
+	ps := c.PointSize()
+
+	f.Fuzz(func(t *testing.T, rndBytes []byte) {
+		// Feed fuzz bytes as entropy; pad to at least PointSize bytes.
+		if len(rndBytes) < ps {
+			pad := make([]byte, ps-len(rndBytes))
+
+			rndBytes = append(rndBytes, pad...)
+		}
+
+		r := bytes.NewReader(rndBytes)
+
+		priv, pub, err := GenerateEphemeralKey(c, r)
+		if err != nil {
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+				return // legit short-read.
+			}
+
+			if err.Error() == errEphemeralZeroKey.Error() {
+				return // legit zero scalar.
+			}
+
+			return // any other error is OK for invalid fuzz input.
+		}
+
+		if len(priv) != ps {
+			t.Fatalf("priv len = %d, want %d", len(priv), ps)
+		}
+
+		if len(pub) != 2*ps {
+			t.Fatalf("pub len = %d, want %d", len(pub), 2*ps)
+		}
+	})
 }

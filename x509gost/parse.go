@@ -5,6 +5,8 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+
+	gost "github.com/bigbes/gostcrypto"
 )
 
 var (
@@ -16,12 +18,16 @@ var (
 	errSPKINoParameters     = errors.New("SPKI AlgorithmIdentifier has no parameters")
 	errCannotParseCurveOID  = errors.New("cannot parse curve OID from SPKI parameters")
 	errEmptyPubKeyBitString = errors.New("empty public key BIT STRING value")
+	errPubKeyLength         = errors.New("GOST public key has wrong length for its curve")
 )
 
 // GOSTAlgorithm identifies which GOST signature family is used.
 type GOSTAlgorithm int
 
 const (
+	// pubKeyCoords is the number of coordinates in a GOST public key (X and Y).
+	pubKeyCoords = 2
+
 	// AlgoR341001 is GOST R 34.10-2001.
 	AlgoR341001 GOSTAlgorithm = iota + 1
 	// AlgoR341012_256 is GOST R 34.10-2012 with 256-bit key.
@@ -70,14 +76,34 @@ type Certificate struct {
 	// with, derived from the SPKI pubkey OID when present, otherwise from
 	// the signature OID. Zero/undefined when both IsGOST and HasGOSTPubKey
 	// are false.
+	//
+	// GOSTAlgo describes the SUBJECT KEY (its strength and the curve family
+	// the key lives on); it drives key parsing and the VKO/KEX role. It must
+	// NOT be used to pick the digest used to verify the certificate's own
+	// signature — that is SigGOSTAlgo (see below and RFC 9215 §2).
 	GOSTAlgo GOSTAlgorithm
 
+	// SigGOSTAlgo identifies the GOST signature algorithm (signwithdigest
+	// OID) that was used to sign THIS certificate's TBSCertificate, derived
+	// from the outer SignatureAlgorithm OID. Per RFC 9215/RFC 7091 the
+	// signwithdigest OID dictates the digest computed over TBSCertificate —
+	// independent of the subject key's own strength. A 256-bit subject key
+	// signed by a 512-bit CA carries GOSTAlgo == AlgoR341012_256 but
+	// SigGOSTAlgo == AlgoR341012_512. Zero when IsGOST is false.
+	SigGOSTAlgo GOSTAlgorithm
+
 	// PubKeyRaw contains the raw GOST public key bytes extracted from
-	// SubjectPublicKeyInfo. The encoding is LE(Y)||LE(X) as produced by
-	// gogost's PublicKey.Raw() method (little-endian X||Y with byte
-	// reversal applied), confirmed against Tarantool-EE 3.5.0 GOST2001 and
-	// GOST2012 server certs via TestTarantoolEE_Ping_GOST_Pure — VKO KEX
-	// and cert-signature verify both succeed with bytes passed through as-is.
+	// SubjectPublicKeyInfo. The encoding is LE(X)||LE(Y): the little-endian
+	// X coordinate followed by the little-endian Y coordinate. This matches
+	// the workspace-wide GOST wire convention and the bytes gost3410sign
+	// (VerifyDigestOnCurve, "pubRaw: LE(X) || LE(Y)") and modes.go
+	// (GenerateEphemeralKey) both expect; it is what gogost's
+	// PublicKey.Raw()/RawLE() emits (it builds BE(Y)||BE(X) then reverses the
+	// whole buffer, yielding LE(X)||LE(Y)). Verified empirically by
+	// TestVerify_GOST_ExternalFixture parsing an OpenSSL+gost-engine 256-A
+	// cert and matching X/Y against the curve point, and end-to-end against
+	// Tarantool-EE 3.5.0 GOST2001/GOST2012 certs via
+	// TestTarantoolEE_Ping_GOST_Pure.
 	PubKeyRaw []byte
 
 	// CurveOID is the curve parameter OID extracted from the
@@ -185,6 +211,10 @@ func ParseCertificate(der []byte) (*Certificate, error) {
 
 	if sigIsGOST {
 		cert.IsGOST = true
+		// Record the signing digest family separately from the subject-key
+		// family: RFC 9215 §2 ties the TBSCertificate digest to the
+		// signwithdigest OID, not to the subject key's strength.
+		cert.SigGOSTAlgo = sigAlgo
 	}
 
 	if pkIsGOST {
@@ -210,12 +240,25 @@ func ParseCertificate(der []byte) (*Certificate, error) {
 
 	cert.CurveOID = curveOID
 
+	// Resolve the curve so the public key length can be validated against the
+	// curve's coordinate size. The raw GOST public key is LE(X)||LE(Y), i.e.
+	// exactly 2*pointSize bytes; anything else is a malformed key and must be
+	// rejected at parse time rather than surfacing later as a generic
+	// "verification failed" with no hint (see X509-69).
+	curve, err := gost.CurveByOID(curveOID)
+	if err != nil {
+		return nil, fmt.Errorf("x509gost: resolve curve OID %v: %w", curveOID, err)
+	}
+
+	wantPubLen := pubKeyCoords * curve.PointSize()
+
 	// Extract raw public key bytes from the BIT STRING.
 	// Per RFC 4491 §2.1 the BIT STRING value is an OCTET STRING containing
 	// the raw key bytes; some implementations embed the bytes directly.
-	// extractGOSTPubKeyBytes tries OCTET STRING first, then raw. Tarantool-EE
-	// 3.5.0 uses the OCTET STRING form (confirmed end-to-end via Ping).
-	pubKeyBytes, err := extractGOSTPubKeyBytes(spki.PublicKey.Bytes)
+	// extractGOSTPubKeyBytes tries OCTET STRING first, then raw, using the
+	// expected length to disambiguate the two encodings. Tarantool-EE 3.5.0
+	// uses the OCTET STRING form (confirmed end-to-end via Ping).
+	pubKeyBytes, err := extractGOSTPubKeyBytes(spki.PublicKey.Bytes, wantPubLen)
 	if err != nil {
 		return nil, fmt.Errorf("x509gost: extract GOST public key bytes: %w", err)
 	}
@@ -299,29 +342,44 @@ func parseCurveOID(params asn1.RawValue) (asn1.ObjectIdentifier, error) {
 }
 
 // extractGOSTPubKeyBytes extracts the raw GOST public key bytes from the
-// value carried in the BIT STRING.
+// value carried in the BIT STRING and validates that they are exactly
+// wantLen bytes (2*pointSize for the curve, the LE(X)||LE(Y) encoding).
 //
 // RFC 4491 §2.1 specifies that the BIT STRING contains an OCTET STRING
 // whose value is the raw key bytes. Some encodings omit the OCTET STRING
 // wrapper and embed the bytes directly. Tarantool-EE 3.5.0 uses the
 // OCTET STRING form (the raw-bytes fallback is defensive).
-func extractGOSTPubKeyBytes(bits []byte) ([]byte, error) {
+//
+// The two encodings are disambiguated by wantLen rather than by "OCTET STRING
+// parses first": a raw 2*pointSize key whose leading bytes happen to form a
+// plausible OCTET STRING header (tag 0x04, length == remaining; ~2^-16 of raw
+// keys) would otherwise be silently mis-parsed into a shorter, wrong key. We
+// only accept the OCTET STRING parse when its inner length equals wantLen;
+// otherwise we treat the BIT STRING value as the raw key. Either way the
+// returned key must be exactly wantLen bytes.
+func extractGOSTPubKeyBytes(bits []byte, wantLen int) ([]byte, error) {
 	if len(bits) == 0 {
 		return nil, errEmptyPubKeyBitString
 	}
 
-	// Try to parse as OCTET STRING (tag=4).
+	// Try to parse as OCTET STRING (tag=4). Accept it only when the inner
+	// value is the exact expected key length — this both disambiguates the
+	// raw-vs-wrapped encodings and rejects truncated wrapped keys.
 	var inner []byte
 
 	rest, err := asn1.Unmarshal(bits, &inner)
-
-	if err == nil && len(rest) == 0 && len(inner) > 0 {
+	if err == nil && len(rest) == 0 && len(inner) == wantLen {
 		return inner, nil
 	}
 
-	// Assume raw bytes directly. gogost expects 2*pointSize bytes.
-	// For a 256-bit key that is 64 bytes; for 512-bit it is 128 bytes.
-	// We accept any non-empty byte slice and let the caller validate length.
+	// Otherwise treat the BIT STRING value as the raw key bytes directly.
+	if len(bits) != wantLen {
+		return nil, fmt.Errorf(
+			"%w: got %d bytes, want %d",
+			errPubKeyLength, len(bits), wantLen,
+		)
+	}
+
 	rawCopy := make([]byte, len(bits))
 	copy(rawCopy, bits)
 
