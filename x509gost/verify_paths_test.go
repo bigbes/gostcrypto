@@ -703,3 +703,131 @@ func TestVerify_GOST_LeafAnyEKU(t *testing.T) {
 func sliceContainsAny(ekus []x509.ExtKeyUsage) bool {
 	return slices.Contains(ekus, x509.ExtKeyUsageAny)
 }
+
+// newGOST256CAWithExt builds a self-signed GOST-256 CA (CA:TRUE + keyCertSign)
+// with the supplied extra extension knobs (e.g. permittedDNS) merged in.
+func newGOST256CAWithExt(t *testing.T, cn string, ext extensionParams) *gostCA {
+	t.Helper()
+
+	priv, pub, err := buildTestKeypair256()
+	if err != nil {
+		t.Fatalf("CA keygen %s: %v", cn, err)
+	}
+
+	notBefore, notAfter := validityWindow()
+
+	ext.setBasicConstraints = true
+	ext.isCA = true
+	ext.keyUsageCertSign = true
+
+	extDER, err := buildExtensionsDER(ext)
+	if err != nil {
+		t.Fatalf("CA ext %s: %v", cn, err)
+	}
+
+	der, err := buildCertDER(buildParams{
+		sigAlgoOID:    OIDSignatureGOSTR341012_256,
+		pubKeyAlgoOID: OIDPublicKeyGOSTR341012_256,
+		curveOID:      OIDParamCryptoProA,
+		privRaw:       priv,
+		pubRaw:        pub,
+		gostAlgo:      AlgoR341012_256,
+		notBefore:     notBefore,
+		notAfter:      notAfter,
+		commonName:    cn,
+		extensionsDER: extDER,
+	})
+	if err != nil {
+		t.Fatalf("CA buildCertDER %s: %v", cn, err)
+	}
+
+	cert, err := ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("CA ParseCertificate %s: %v", cn, err)
+	}
+
+	return &gostCA{cn: cn, priv: priv, cert: cert}
+}
+
+// TestVerify_GOST_NameConstraint_PermittedDNS pins R2-X509-01's name-constraint
+// processing: a CA with PermittedDNSDomains=["example.com"] must REJECT a leaf
+// whose only SAN is out of scope ("evil.org") and ACCEPT one whose SAN is
+// in scope ("host.example.com"). Reverting applyNameConstraints fails the
+// reject leg (the out-of-scope leaf would verify).
+func TestVerify_GOST_NameConstraint_PermittedDNS(t *testing.T) {
+	t.Parallel()
+
+	ca := newGOST256CAWithExt(t, "nc-permitted-ca", extensionParams{
+		permittedDNS: []string{"example.com"},
+	})
+
+	// Guard: the CA must actually carry the parsed permitted constraint, else
+	// the test is vacuous.
+	if !slices.Contains(ca.cert.Stdlib.PermittedDNSDomains, "example.com") {
+		t.Fatal("test setup: CA missing PermittedDNSDomains=example.com")
+	}
+
+	inScope := buildGOST256Cert(t, "in-scope-leaf", ca, extensionParams{
+		dnsSANs: []string{"host.example.com"},
+	})
+	outOfScope := buildGOST256Cert(t, "out-of-scope-leaf", ca, extensionParams{
+		dnsSANs: []string{"evil.org"},
+	})
+
+	// Guard: SANs must have parsed.
+	if !slices.Contains(outOfScope.Stdlib.DNSNames, "evil.org") {
+		t.Fatal("test setup: out-of-scope leaf missing DNS SAN evil.org")
+	}
+
+	// In-scope leaf must verify.
+	if _, err := inScope.Verify(VerifyOptions{
+		GOSTRoots:   []*Certificate{ca.cert},
+		CurrentTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("in-scope leaf (host.example.com) should verify under PermittedDNSDomains=example.com: %v", err)
+	}
+
+	// Out-of-scope leaf must be rejected.
+	if _, err := outOfScope.Verify(VerifyOptions{
+		GOSTRoots:   []*Certificate{ca.cert},
+		CurrentTime: time.Now(),
+	}); err == nil {
+		t.Fatal("out-of-scope leaf (evil.org) unexpectedly verified under PermittedDNSDomains=example.com")
+	}
+}
+
+// TestVerify_GOST_NameConstraint_ExcludedDNS pins the excluded-domain leg of
+// R2-X509-01: a CA with ExcludedDNSDomains=["bad.example.com"] must REJECT a
+// leaf SAN inside the excluded subtree and ACCEPT one outside it.
+func TestVerify_GOST_NameConstraint_ExcludedDNS(t *testing.T) {
+	t.Parallel()
+
+	ca := newGOST256CAWithExt(t, "nc-excluded-ca", extensionParams{
+		excludedDNS: []string{"bad.example.com"},
+	})
+
+	if !slices.Contains(ca.cert.Stdlib.ExcludedDNSDomains, "bad.example.com") {
+		t.Fatal("test setup: CA missing ExcludedDNSDomains=bad.example.com")
+	}
+
+	allowed := buildGOST256Cert(t, "allowed-leaf", ca, extensionParams{
+		dnsSANs: []string{"good.example.com"},
+	})
+	blocked := buildGOST256Cert(t, "blocked-leaf", ca, extensionParams{
+		dnsSANs: []string{"host.bad.example.com"},
+	})
+
+	if _, err := allowed.Verify(VerifyOptions{
+		GOSTRoots:   []*Certificate{ca.cert},
+		CurrentTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("leaf outside the excluded subtree should verify: %v", err)
+	}
+
+	if _, err := blocked.Verify(VerifyOptions{
+		GOSTRoots:   []*Certificate{ca.cert},
+		CurrentTime: time.Now(),
+	}); err == nil {
+		t.Fatal("leaf inside ExcludedDNSDomains=bad.example.com unexpectedly verified")
+	}
+}
