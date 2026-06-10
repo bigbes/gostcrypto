@@ -16,3 +16,24 @@ without requiring gost-engine.
 These are public certificates (no private keys) and contain no secrets. They
 are valid 2026-04-22 .. 2036-04-19; the verify test pins `CurrentTime` inside
 that window.
+
+## Externally-signed GOST fixtures (independent wire-format anchor)
+
+The certs above carry GOST public keys but are **RSA-signed**, so they do not
+exercise GOST signature verification. The fixtures below are **GOST-signed** by
+OpenSSL 3 + gost-engine 3.0.3 (an implementation independent of this module),
+so parsing and verifying them pins the GOST certificate wire format
+(signature BIT STRING ordering, `LE(X)||LE(Y)` public key encoding,
+signwithdigest-vs-pubkey OID handling). Regenerate with `generate.sh`. They are
+valid 2026-06-10 .. 2036-06-07; the verify tests pin `CurrentTime` inside that
+window. Used by `TestVerify_GOST_ExternalFixture` / `TestVerify_GOST_ExternalChain`.
+
+- `gost256_selfsigned.crt` — GOST R 34.10-2012 256-bit self-signed (curve
+  CryptoPro-A), signwithdigest-256.
+- `gost512_selfsigned.crt` — GOST R 34.10-2012 512-bit self-signed (curve
+  TC26-512-A), signwithdigest-512 (exercises the Streebog-512 verify branch).
+- `ca512.crt` — GOST R 34.10-2012 512-bit CA (CA:TRUE, keyCertSign).
+- `leaf256_signedby512.crt` — leaf with a **256-bit** subject key **signed by
+  the 512-bit CA** (`ca512.crt`) with signwithdigest-512. The signing digest is
+  Streebog-512 (from the signature OID), not Streebog-256 (the subject key OID)
+  — the X509-65 mixed-strength scenario.
