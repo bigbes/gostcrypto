@@ -340,6 +340,17 @@ type extensionParams struct {
 	// marked critical and an empty value. The stdlib parser does not recognize
 	// it, so it lands in Stdlib.UnhandledCriticalExtensions.
 	unknownCriticalOID asn1.ObjectIdentifier
+
+	// dnsSANs, when non-empty, emits a SubjectAltName extension listing them as
+	// dNSName (tag [2]) entries. Used to give a leaf names to match against a
+	// CA's name constraints.
+	dnsSANs []string
+
+	// permittedDNS / excludedDNS, when non-empty, emit a NameConstraints
+	// extension (OID 2.5.29.30) with the given permitted/excluded
+	// dNSName GeneralSubtrees. Used to make a CA name-constrained.
+	permittedDNS []string
+	excludedDNS  []string
 }
 
 // buildExtensionsDER builds the [3] EXPLICIT Extensions field for a
@@ -384,6 +395,24 @@ func buildExtensionsDER(p extensionParams) ([]byte, error) {
 
 	if len(p.unknownCriticalOID) > 0 {
 		ext, err := marshalExtension(p.unknownCriticalOID, true, []byte{})
+		if err != nil {
+			return nil, err
+		}
+
+		extns = append(extns, ext)
+	}
+
+	if len(p.dnsSANs) > 0 {
+		ext, err := buildSANExtension(p.dnsSANs)
+		if err != nil {
+			return nil, err
+		}
+
+		extns = append(extns, ext)
+	}
+
+	if len(p.permittedDNS) > 0 || len(p.excludedDNS) > 0 {
+		ext, err := buildNameConstraintsExtension(p.permittedDNS, p.excludedDNS)
 		if err != nil {
 			return nil, err
 		}
@@ -456,6 +485,130 @@ func marshalExtension(oid asn1.ObjectIdentifier, critical bool, value []byte) ([
 	}
 
 	return asn1.Marshal(extension{ID: oid, Critical: critical, Value: value})
+}
+
+// dnsNameTag is the context-specific tag [2] for a dNSName GeneralName.
+const dnsNameTag = 2
+
+// buildSANExtension builds a non-critical SubjectAltName extension (OID
+// 2.5.29.17) listing the given DNS names as dNSName ([2] IMPLICIT IA5String)
+// GeneralNames.
+func buildSANExtension(dnsNames []string) ([]byte, error) {
+	var generalNames [][]byte
+
+	for _, name := range dnsNames {
+		gn, err := asn1.Marshal(asn1.RawValue{
+			Class: asn1.ClassContextSpecific,
+			Tag:   dnsNameTag, // [2] dNSName, IMPLICIT IA5String.
+			Bytes: []byte(name),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		generalNames = append(generalNames, gn)
+	}
+
+	sanSeq, err := asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassUniversal,
+		Tag:        asn1.TagSequence,
+		IsCompound: true,
+		Bytes:      concatBytes(generalNames...),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return marshalExtension(asn1.ObjectIdentifier{2, 5, 29, 17}, false, sanSeq)
+}
+
+// buildNameConstraintsExtension builds a critical NameConstraints extension
+// (OID 2.5.29.30) with the given permitted/excluded dNSName subtrees.
+//
+//	NameConstraints ::= SEQUENCE { permittedSubtrees [0] GeneralSubtrees OPTIONAL,
+//	                               excludedSubtrees  [1] GeneralSubtrees OPTIONAL }
+//	GeneralSubtree  ::= SEQUENCE { base GeneralName, minimum [0] DEFAULT 0, maximum [1] OPTIONAL }
+func buildNameConstraintsExtension(permitted, excluded []string) ([]byte, error) {
+	subtrees := func(names []string) ([]byte, error) {
+		var out [][]byte
+
+		for _, name := range names {
+			base, err := asn1.Marshal(asn1.RawValue{
+				Class: asn1.ClassContextSpecific,
+				Tag:   dnsNameTag, // [2] dNSName.
+				Bytes: []byte(name),
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			subtree, err := asn1.Marshal(asn1.RawValue{
+				Class:      asn1.ClassUniversal,
+				Tag:        asn1.TagSequence,
+				IsCompound: true,
+				Bytes:      base,
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			out = append(out, subtree)
+		}
+
+		return concatBytes(out...), nil
+	}
+
+	var body []byte
+
+	if len(permitted) > 0 {
+		st, err := subtrees(permitted)
+		if err != nil {
+			return nil, err
+		}
+
+		permittedField, err := asn1.Marshal(asn1.RawValue{
+			Class:      asn1.ClassContextSpecific,
+			Tag:        0, // permittedSubtrees [0].
+			IsCompound: true,
+			Bytes:      st,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		body = append(body, permittedField...)
+	}
+
+	if len(excluded) > 0 {
+		st, err := subtrees(excluded)
+		if err != nil {
+			return nil, err
+		}
+
+		excludedField, err := asn1.Marshal(asn1.RawValue{
+			Class:      asn1.ClassContextSpecific,
+			Tag:        1, // excludedSubtrees [1].
+			IsCompound: true,
+			Bytes:      st,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		body = append(body, excludedField...)
+	}
+
+	ncSeq, err := asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassUniversal,
+		Tag:        asn1.TagSequence,
+		IsCompound: true,
+		Bytes:      body,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return marshalExtension(asn1.ObjectIdentifier{2, 5, 29, 30}, true, ncSeq)
 }
 
 // concatBytes concatenates byte slices.

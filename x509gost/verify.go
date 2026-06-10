@@ -32,6 +32,9 @@ var (
 	errPathLenExceeded = errors.New(
 		"x509gost: too many intermediates for the pathLenConstraint of a CA in the chain",
 	)
+	errNameConstraintViolation = errors.New(
+		"x509gost: leaf name is not permitted by a CA name constraint in the chain",
+	)
 )
 
 // VerifyOptions controls certificate chain verification.
@@ -102,11 +105,15 @@ func (o VerifyOptions) toStdlibVerifyOptions() x509.VerifyOptions {
 // On the GOST path the assembled chain is additionally subjected to the RFC
 // 5280 path-validation checks the stdlib applies on the non-GOST path: any
 // cert carrying an unhandled critical extension is rejected (§4.2 MUST-reject),
-// and a CA's pathLenConstraint is enforced against the number of intermediates
-// below it. RFC 5280 name constraints (PermittedDNSDomains/ExcludedDNSDomains
-// and the IP/email/URI families) are NOT yet enforced on the GOST path — a
-// name-constrained GOST CA is currently not honored; see validateGOSTChainConstraints.
-// Absent extensions remain permitted (the permissive-when-unset posture).
+// a CA's pathLenConstraint is enforced against the number of intermediates
+// below it, and RFC 5280 §4.2.1.10 name constraints are enforced — a
+// name-constrained CA's PermittedDNSDomains/ExcludedDNSDomains,
+// PermittedIPRanges/ExcludedIPRanges, PermittedEmailAddresses/
+// ExcludedEmailAddresses, and PermittedURIDomains/ExcludedURIDomains are matched
+// against the DNSNames, IPAddresses, EmailAddresses, and URIs of every cert
+// below it. Absent constraint fields impose nothing (the permissive-when-unset
+// posture); only present constraint data is enforced. See
+// validateGOSTChainConstraints.
 //
 // A GOSTRoots entry is a trust anchor: a leaf byte-identical to one is accepted
 // as a one-element chain by provision (RFC 5280 §6.1), with no self-signature
@@ -311,13 +318,15 @@ func buildGOSTChain(
 //     non-negative MaxPathLen, the number of intermediates below it must not
 //     exceed it (the stdlib numIntermediates > MaxPathLen rule).
 //
-// NOT honored yet (deferred, see the Verify doc comment): RFC 5280 name
-// constraints (PermittedDNSDomains/ExcludedDNSDomains and the IP/email/URI
-// constraint families). Honoring only some constraint types would silently pass
-// the rest, so name constraints are left entirely unenforced rather than
-// partially enforced — the permissive-when-unset posture is unchanged, but a
-// name-constrained intermediate is currently not honored. Absent extensions
-// remain permitted; only the two checks above act on present data.
+// Name constraints: every CA above a cert (RFC 5280 §4.2.1.10) has its PRESENT
+// PermittedDNSDomains/ExcludedDNSDomains, PermittedIPRanges/ExcludedIPRanges,
+// PermittedEmailAddresses/ExcludedEmailAddresses, and
+// PermittedURIDomains/ExcludedURIDomains applied to the SANs (DNSNames,
+// IPAddresses, EmailAddresses, URIs) of every cert below it, mirroring stdlib's
+// per-CA-over-all-descendants walk (crypto/x509 checkChainConstraints). Absent
+// constraint fields impose nothing (the permissive-when-unset posture); only
+// present constraint data is enforced. See applyNameConstraints in
+// constraints.go (logic adapted from Go stdlib crypto/x509/constraints.go).
 func validateGOSTChainConstraints(chain []*Certificate) error {
 	for i, cert := range chain {
 		std := cert.Stdlib
@@ -343,6 +352,15 @@ func validateGOSTChainConstraints(chain []*Certificate) error {
 					"%w (cert %d MaxPathLen=%d, intermediates below=%d)",
 					errPathLenExceeded, i, std.MaxPathLen, numIntermediates,
 				)
+			}
+		}
+
+		// Name constraints: a CA at index i (any cert above index j) constrains
+		// every cert below it. Apply this cert's PRESENT name constraints to the
+		// SANs of each cert below it in the chain (indices [0, i)).
+		for j := range i {
+			if err := applyNameConstraints(std, chain[j].Stdlib); err != nil {
+				return err
 			}
 		}
 	}
