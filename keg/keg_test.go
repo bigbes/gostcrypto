@@ -3,8 +3,10 @@ package keg_test
 import (
 	"bytes"
 	"encoding/hex"
+	"math/big"
 	"testing"
 
+	"github.com/bigbes/gostcrypto/gost3410curves"
 	"github.com/bigbes/gostcrypto/keg"
 )
 
@@ -137,10 +139,212 @@ func TestKEG2012_256_ZeroUKM(t *testing.T) {
 	}
 }
 
-func TestKEG2012_256_ShortUKM(t *testing.T) {
+// TestKEG2012_256_UKMLen pins the exact-32-byte ukm_source contract (KEG-35):
+// the spec (keg.md §Sizes) fixes ukm_source at 32 bytes (= a Streebog-256
+// digest), and the downstream KExp15 IV is read from ukm_source[24:24+ivLen],
+// so any other length is malformed. Earlier the package accepted any length
+// >= 24 and silently ignored extra bytes; now 23..31 and 33 all error.
+func TestKEG2012_256_UKMLen(t *testing.T) {
 	t.Parallel()
 
-	if _, err := keg.KEG2012_256(nil, mustHex(t, pubBHex), mustHex(t, privAHex), make([]byte, 23)); err == nil {
-		t.Fatal("expected error for ukm_source shorter than 24 bytes")
+	pub := mustHex(t, pubBHex)
+	priv := mustHex(t, privAHex)
+
+	for _, n := range []int{0, 16, 23, 24, 31, 33, 64} {
+		if _, err := keg.KEG2012_256(nil, pub, priv, make([]byte, n)); err == nil {
+			t.Errorf("ukm_source length %d: expected error, got nil", n)
+		}
+	}
+
+	// Exactly 32 succeeds.
+	if _, err := keg.KEG2012_256(nil, pub, priv, mustHex(t, ukmHex)); err != nil {
+		t.Errorf("32-byte ukm_source: unexpected error %v", err)
+	}
+}
+
+// zeroUKMWantHex is KEG2012_256(privA, pubB, ukm=32×0x00) on TC26 256-bit
+// ParamSet A. The all-zero first 16 bytes trigger the real_ukm = 00…00 01
+// special case (keg.go:setting realUKM[15]=1, engine ground truth
+// tmp/engine/gost_ec_keyx.c:140-142). Pinning the exact output bytes catches a
+// byte-position slip (realUKM[0]=1 instead of realUKM[15]=1) that pair-symmetry
+// and "differs from non-zero" alone would miss (KEG-36).
+//
+// Source: the gogost-backed reference gostcryptocompat.KEG2012_256 (the de-facto
+// spec this module matches), computed on 2026-06-10 with privAHex/pubBHex and a
+// 32-byte zero ukm_source on curve OID 1.2.643.7.1.2.1.1.1.
+const zeroUKMWantHex = "1f28179da81185e6019a6bc43568b9d8be3788111c50dff78b2a04259f8ecc73" +
+	"ddc39fe3d635dc2ffd7071286d4d074421307548b847dbb88039b94015382a6e"
+
+// TestKEG2012_256_ZeroUKM_KAT pins the zero-UKM special-case output bytes
+// (KEG-36), not just its round-trip properties.
+func TestKEG2012_256_ZeroUKM_KAT(t *testing.T) {
+	t.Parallel()
+
+	want := mustHex(t, zeroUKMWantHex)
+	zeroUKM := make([]byte, 32)
+
+	got, err := keg.KEG2012_256(nil, mustHex(t, pubBHex), mustHex(t, privAHex), zeroUKM)
+	if err != nil {
+		t.Fatalf("KEG2012_256 zero-UKM: %v", err)
+	}
+
+	if !bytes.Equal(got[:], want) {
+		t.Fatalf("zero-UKM KAT mismatch:\n got %x\nwant %x", got[:], want)
+	}
+}
+
+// TestKEG2012_256_BadKeys pins keg's pass-through error contract for malformed
+// key material (KEG-37): wrong-length / off-curve public key, wrong-length /
+// zero private key. Each must return an error (not panic, not output); the
+// errors originate in the vko sibling and propagate unchanged.
+func TestKEG2012_256_BadKeys(t *testing.T) {
+	t.Parallel()
+
+	goodPub := mustHex(t, pubBHex)
+	goodPriv := mustHex(t, privAHex)
+	ukm := mustHex(t, ukmHex)
+
+	// An off-curve public key: flip one byte of a valid key so the point no
+	// longer satisfies the curve equation.
+	offCurvePub := append([]byte(nil), goodPub...)
+	offCurvePub[0] ^= 0xff
+
+	cases := []struct {
+		name string
+		pub  []byte
+		priv []byte
+	}{
+		{"short_pub_63", goodPub[:63], goodPriv},
+		{"long_pub_65", append(append([]byte(nil), goodPub...), 0x00), goodPriv},
+		{"off_curve_pub", offCurvePub, goodPriv},
+		{"short_priv_31", goodPub, goodPriv[:31]},
+		{"long_priv_33", goodPub, append(append([]byte(nil), goodPriv...), 0x00)},
+		{"zero_priv", goodPub, make([]byte, 32)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := keg.KEG2012_256(nil, tc.pub, tc.priv, ukm); err == nil {
+				t.Fatalf("%s: expected error, got nil", tc.name)
+			}
+		})
+	}
+}
+
+// pubRawLE generates the LE(X)‖LE(Y) raw public key for the scalar privLE on the
+// given 256-bit curve, mirroring vko's wire format (each coordinate a 32-byte
+// little-endian fixed-width buffer). Used to build valid keypairs on a non-TC26-A
+// curve in-test so the curve parameter is exercised on its own constants.
+func pubRawLE(t *testing.T, c *gost3410curves.Curve, privLE []byte) []byte {
+	t.Helper()
+
+	d := new(big.Int).SetBytes(reverseBytes(privLE))
+	p := c.ScalarMult(d, c.Base())
+	size := c.PointSize()
+	out := make([]byte, 2*size)
+	copy(out[:size], leFixed(p.X, size))
+	copy(out[size:], leFixed(p.Y, size))
+
+	return out
+}
+
+// reverseBytes returns a new reversed copy of b (LE↔BE for a fixed-width int).
+func reverseBytes(b []byte) []byte {
+	out := make([]byte, len(b))
+	for i := range b {
+		out[len(b)-1-i] = b[i]
+	}
+
+	return out
+}
+
+// leFixed serializes n as a little-endian fixed-width (size bytes) slice.
+func leFixed(n *big.Int, size int) []byte {
+	be := make([]byte, size)
+	n.FillBytes(be)
+
+	return reverseBytes(be)
+}
+
+// TestKEG2012_256_CurveHonored proves the curve parameter is actually used
+// (KEG-34): a keypair generated on CryptoPro 256-A (OID 1.2.643.2.2.35.1, a
+// non-default 256-bit curve) runs through KEG without the "point not on curve"
+// error that the old curve-ignoring code produced, is pair-symmetric, and
+// differs from the TC26-256-A result for the same scalars.
+func TestKEG2012_256_CurveHonored(t *testing.T) {
+	t.Parallel()
+
+	cp, err := gost3410curves.CurveByOID("1.2.643.2.2.35.1")
+	if err != nil {
+		t.Fatalf("CurveByOID CryptoPro-A: %v", err)
+	}
+
+	privA := mustHex(t, privAHex)
+	privB := mustHex(t, privBHex)
+	pubA := pubRawLE(t, cp, privA)
+	pubB := pubRawLE(t, cp, privB)
+	ukm := mustHex(t, ukmHex)
+
+	ab, err := keg.KEG2012_256(cp, pubB, privA, ukm)
+	if err != nil {
+		t.Fatalf("KEG on CryptoPro-A A→B: %v", err)
+	}
+
+	ba, err := keg.KEG2012_256(cp, pubA, privB, ukm)
+	if err != nil {
+		t.Fatalf("KEG on CryptoPro-A B→A: %v", err)
+	}
+
+	if ab != ba {
+		t.Fatalf("KEG on CryptoPro-A not pair-symmetric:\n A→B %x\n B→A %x", ab[:], ba[:])
+	}
+
+	// On TC26-256-A the same private scalars yield a different public point and
+	// thus a different shared secret; the result must differ from the CryptoPro
+	// derivation, confirming the curve is honored end-to-end.
+	tcA, err := gost3410curves.CurveByOID("1.2.643.7.1.2.1.1.1")
+	if err != nil {
+		t.Fatalf("CurveByOID TC26-256-A: %v", err)
+	}
+
+	tcPubB := pubRawLE(t, tcA, privB)
+
+	tcAB, err := keg.KEG2012_256(tcA, tcPubB, privA, ukm)
+	if err != nil {
+		t.Fatalf("KEG on TC26-256-A: %v", err)
+	}
+
+	if ab == tcAB {
+		t.Fatal("CryptoPro-A and TC26-256-A produced identical output; curve not honored")
+	}
+
+	// nil defaults to TC26-256-A: same scalars/pub on tcA must match the nil call.
+	nilAB, err := keg.KEG2012_256(nil, tcPubB, privA, ukm)
+	if err != nil {
+		t.Fatalf("KEG nil-curve: %v", err)
+	}
+
+	if nilAB != tcAB {
+		t.Fatalf("nil curve != explicit TC26-256-A:\n nil %x\n tc26 %x", nilAB[:], tcAB[:])
+	}
+}
+
+// TestKEG2012_256_Reject512 pins that a 512-bit curve is rejected with an error
+// rather than silently running the wrong (256-bit) algorithm on it (KEG-34).
+func TestKEG2012_256_Reject512(t *testing.T) {
+	t.Parallel()
+
+	c512, err := gost3410curves.CurveByOID("1.2.643.7.1.2.1.2.1") // tc26-512-A.
+	if err != nil {
+		t.Fatalf("CurveByOID tc26-512-A: %v", err)
+	}
+
+	// 64-byte priv / 128-byte pub would be needed for a 512 curve, but the size
+	// check fires before VKO — keg must reject the curve up front regardless.
+	_, err = keg.KEG2012_256(c512, make([]byte, 128), make([]byte, 64), mustHex(t, ukmHex))
+	if err == nil {
+		t.Fatal("expected error for 512-bit curve, got nil")
 	}
 }

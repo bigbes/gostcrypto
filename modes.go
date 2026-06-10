@@ -17,10 +17,10 @@ import (
 	"github.com/bigbes/gostcrypto/gost28147imit"
 	"github.com/bigbes/gostcrypto/gost3410sign"
 	"github.com/bigbes/gostcrypto/kdftree"
+	"github.com/bigbes/gostcrypto/keg"
 	"github.com/bigbes/gostcrypto/kexp15"
 	"github.com/bigbes/gostcrypto/omac"
 	"github.com/bigbes/gostcrypto/tlstree"
-	"github.com/bigbes/gostcrypto/vko"
 )
 
 // Fixed sizes (bytes) for the mode/KDF/KEX wrappers below.
@@ -31,11 +31,6 @@ const (
 	tlsTreeMasterKeySize = 32
 	// kegUKMSourceSize is the KEG2012_256 ukmSource length.
 	kegUKMSourceSize = 32
-	// kegRealUKMSize is the length of the derived real UKM (first half of
-	// ukmSource, reversed).
-	kegRealUKMSize = 16
-	// kegOutputSize is the KEG2012_256 derived shared-secret length.
-	kegOutputSize = 64
 )
 
 // Sentinel errors for the mode/KDF/KEX wrapper input validation.
@@ -53,12 +48,6 @@ var (
 	errIMITEmptyMessage = errors.New("gost: GOST28147_IMIT message must not be empty")
 	errEphemeralZeroKey = errors.New("gost.GenerateEphemeralKey: zero private key")
 )
-
-// vkoKEK2012256 computes the VKO GOST R 34.10-2012 256-bit KEK on the given
-// curve. Wrapper-local so KEG2012_256 can honor the caller's curve.
-func vkoKEK2012256(curve *Curve, prvLE, pubLE, ukmRaw []byte) ([]byte, error) {
-	return vko.KEK2012256(curve.inner, prvLE, pubLE, ukmRaw)
-}
 
 // ── GOST R 34.13-2015 CTR mode (+ ACPKM) ─────────────────────────────────────.
 
@@ -191,46 +180,20 @@ func (t *TLSTree) Derive(seqNum uint64) []byte { return t.inner.Derive(seqNum) }
 // KEG2012_256 derives a 64-byte shared secret using the GOST 2018 KEG algorithm
 // (R 1323565.1.020-2018 §6.4.5.1) on the supplied 256-bit curve.
 //
-// The clean-room keg package always operates on TC26 256-A; this wrapper
-// instead honors the caller's curve (mirroring the gogost backend, which uses
-// the curve extracted from the server certificate). It composes the algorithm
-// directly: realUKM = reverse(ukmSource[:16]) (or 00..01 if all-zero), then
-// tmpkey = VKO-2012-256(curve, clientPriv, serverPub, realUKM), then
-// KDFTree2012-256(tmpkey, "kdf tree", ukmSource[16:24], 64).
+// It honors the caller's curve (extracted from the server certificate),
+// delegating to the clean-room keg package, which performs the UKM adjustment,
+// VKO-2012-256 agreement and KDFTree expansion. A 512-bit curve is rejected by
+// keg with an error.
 func KEG2012_256(curve *Curve, serverPubRaw, clientPrivRaw, ukmSource []byte) ([64]byte, error) {
 	var out [64]byte
 
+	// Preserve the facade's own UKM-length sentinel; keg also enforces 32, but
+	// surfacing errKEGUKMSourceLen keeps the facade error contract stable.
 	if len(ukmSource) != kegUKMSourceSize {
 		return out, fmt.Errorf("%w, got %d", errKEGUKMSourceLen, len(ukmSource))
 	}
 
-	realUKM := make([]byte, kegRealUKMSize)
-	allZero := true
-
-	for _, b := range ukmSource[:kegRealUKMSize] {
-		if b != 0 {
-			allZero = false
-			break
-		}
-	}
-
-	if allZero {
-		realUKM[kegRealUKMSize-1] = 1
-	} else {
-		for i := range kegRealUKMSize {
-			realUKM[i] = ukmSource[kegRealUKMSize-1-i]
-		}
-	}
-
-	tmpkey, err := vkoKEK2012256(curve, clientPrivRaw, serverPubRaw, realUKM)
-	if err != nil {
-		return out, fmt.Errorf("gost.KEG2012_256: %w", err)
-	}
-
-	expkeys := kdftree.KDFTree256(tmpkey, []byte("kdf tree"), ukmSource[16:24], 1, kegOutputSize)
-	copy(out[:], expkeys)
-
-	return out, nil
+	return keg.KEG2012_256(curve.inner, serverPubRaw, clientPrivRaw, ukmSource)
 }
 
 // ── kexp15 (GOST 2018 key export) ────────────────────────────────────────────.
