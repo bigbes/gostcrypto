@@ -26,6 +26,12 @@ var (
 	errLeafEKUMismatch     = errors.New(
 		"x509gost: leaf does not satisfy the requested extended key usages",
 	)
+	errUnhandledCriticalExt = errors.New(
+		"x509gost: certificate has an unhandled critical extension",
+	)
+	errPathLenExceeded = errors.New(
+		"x509gost: too many intermediates for the pathLenConstraint of a CA in the chain",
+	)
 )
 
 // VerifyOptions controls certificate chain verification.
@@ -92,6 +98,19 @@ func (o VerifyOptions) toStdlibVerifyOptions() x509.VerifyOptions {
 //     root) are not supported; non-GOST entries in the GOST pools are skipped
 //     and only contribute to the explicit mixed-chain error when no all-GOST
 //     chain exists.
+//
+// On the GOST path the assembled chain is additionally subjected to the RFC
+// 5280 path-validation checks the stdlib applies on the non-GOST path: any
+// cert carrying an unhandled critical extension is rejected (§4.2 MUST-reject),
+// and a CA's pathLenConstraint is enforced against the number of intermediates
+// below it. RFC 5280 name constraints (PermittedDNSDomains/ExcludedDNSDomains
+// and the IP/email/URI families) are NOT yet enforced on the GOST path — a
+// name-constrained GOST CA is currently not honored; see validateGOSTChainConstraints.
+// Absent extensions remain permitted (the permissive-when-unset posture).
+//
+// A GOSTRoots entry is a trust anchor: a leaf byte-identical to one is accepted
+// as a one-element chain by provision (RFC 5280 §6.1), with no self-signature
+// check, so a cross-signed CA placed in the pool does not abort the search.
 //
 // Chain building is depth-bounded: at most maxGOSTChainDepth certificates
 // (leaf included) are traversed. Hierarchies deeper than that will not verify.
@@ -175,7 +194,9 @@ func (c *Certificate) Verify(opts VerifyOptions) ([][]*Certificate, error) {
 // leafSatisfiesKeyUsages reports whether leaf passes the requested extended
 // key usage constraints. The semantics match the doc on
 // VerifyOptions.KeyUsages: an empty request, an ExtKeyUsageAny request, a leaf
-// with no EKU extension, or any single requested usage being present all pass.
+// with no EKU extension, a leaf that itself asserts ExtKeyUsageAny
+// (anyExtendedKeyUsage, OID 2.5.29.37.0 — "valid for any purpose", RFC 5280
+// §4.2.1.12), or any single requested usage being present all pass.
 func leafSatisfiesKeyUsages(leaf *x509.Certificate, requested []x509.ExtKeyUsage) bool {
 	if len(requested) == 0 {
 		return true
@@ -183,6 +204,15 @@ func leafSatisfiesKeyUsages(leaf *x509.Certificate, requested []x509.ExtKeyUsage
 
 	// A leaf with no EKU extension is unconstrained.
 	if len(leaf.ExtKeyUsage) == 0 && len(leaf.UnknownExtKeyUsage) == 0 {
+		return true
+	}
+
+	// A leaf that asserts anyExtendedKeyUsage is valid for any requested
+	// purpose, so it satisfies every request (mirrors stdlib
+	// checkChainForKeyUsage, crypto/x509/verify.go:1003-1008, which skips a
+	// cert that lists ExtKeyUsageAny). Without this a leaf carrying Any is
+	// falsely rejected for any specific request.
+	if slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageAny) {
 		return true
 	}
 
@@ -229,22 +259,21 @@ func buildGOSTChain(
 	gostRoots, gostIntermediates []*Certificate,
 	now time.Time,
 ) ([]*Certificate, error) {
-	// Check whether the leaf is directly in the root set (self-signed case).
-	for _, root := range gostRoots {
-		if !root.IsGOST {
-			continue
-		}
-
-		if certEqual(leaf, root) {
-			// Self-signed: verify the cert against itself.
-			err := verifyGOSTSignature(leaf, leaf)
-			if err != nil {
-				return nil, fmt.Errorf("x509gost: self-signed GOST cert signature invalid: %w", err)
-			}
-
-			return []*Certificate{leaf}, nil
-		}
-	}
+	// R2-X509-03: a leaf byte-identical to a GOSTRoots entry is NOT short-
+	// circuited here on a self-signature check. The previous code ran
+	// verifyGOSTSignature(leaf, leaf) and aborted the whole search on failure,
+	// so a cross-signed CA placed in the pool (whose signature was made by a
+	// different key) could not verify even when a valid chain via another root
+	// existed. Instead we fall through to the recursive search, which (a) for a
+	// genuine self-signed root finds it as its own signer and (b) for a
+	// cross-signed CA finds the actual signer in the pool. This still rejects a
+	// tampered/invalid self-signed cert (no valid signer is found), preserving
+	// TestVerify_GOST_Tampered, while aligning with the stdlib trust-anchor
+	// model that trusts a pool member by provision rather than aborting on a
+	// self-signature mismatch (crypto/x509/verify.go:596-598). A pool match is
+	// thus trusted only when *some* valid signer for it exists in the pool —
+	// the option the existing tampered-cert test requires (the unconditional-
+	// trust variant would accept the tampered cert).
 
 	// sawNonGOST tracks whether any non-GOST candidate was skipped, so a
 	// failed search can report the mixed-chain error instead of the generic
@@ -253,6 +282,10 @@ func buildGOSTChain(
 
 	chain := buildGOSTChainRec(leaf, gostRoots, gostIntermediates, now, maxGOSTChainDepth, &sawNonGOST)
 	if chain != nil {
+		if err := validateGOSTChainConstraints(chain); err != nil {
+			return nil, err
+		}
+
 		return chain, nil
 	}
 
@@ -261,6 +294,60 @@ func buildGOSTChain(
 	}
 
 	return nil, errNoValidGOSTChain
+}
+
+// validateGOSTChainConstraints applies the RFC 5280 §4.2 / §6.1 path-validation
+// checks the stdlib applies on the non-GOST path but which the self-contained
+// GOST walk would otherwise skip, giving a GOST leaf strictly weaker validation
+// than a non-GOST leaf through the same Certificate.Verify entry point
+// (R2-X509-01). chain is leaf-first, root-last.
+//
+// Honored here:
+//
+//   - Unhandled critical extensions: any cert carrying a critical extension the
+//     stdlib parser did not recognize is rejected (RFC 5280 §4.2 MUST-reject),
+//     mirroring crypto/x509's UnhandledCriticalExtensions check.
+//   - pathLenConstraint: when a CA in the chain has BasicConstraintsValid and a
+//     non-negative MaxPathLen, the number of intermediates below it must not
+//     exceed it (the stdlib numIntermediates > MaxPathLen rule).
+//
+// NOT honored yet (deferred, see the Verify doc comment): RFC 5280 name
+// constraints (PermittedDNSDomains/ExcludedDNSDomains and the IP/email/URI
+// constraint families). Honoring only some constraint types would silently pass
+// the rest, so name constraints are left entirely unenforced rather than
+// partially enforced — the permissive-when-unset posture is unchanged, but a
+// name-constrained intermediate is currently not honored. Absent extensions
+// remain permitted; only the two checks above act on present data.
+func validateGOSTChainConstraints(chain []*Certificate) error {
+	for i, cert := range chain {
+		std := cert.Stdlib
+
+		// RFC 5280 §4.2: reject any cert with an unrecognized critical
+		// extension. Applies to every cert in the chain, leaf included.
+		if len(std.UnhandledCriticalExtensions) > 0 {
+			return fmt.Errorf(
+				"%w (%v)", errUnhandledCriticalExt, std.UnhandledCriticalExtensions,
+			)
+		}
+
+		// pathLenConstraint: count the intermediates that sit below this cert
+		// in the chain. The chain is leaf-first, so for the cert at index i the
+		// certs at indices [1, i) are the intermediates between it and the leaf
+		// (the leaf at index 0 is the end-entity, not an intermediate). This
+		// mirrors stdlib's numIntermediates = len(currentChain) - 1 with
+		// currentChain being the leaf-up-to-this-cert prefix.
+		if std.BasicConstraintsValid && std.MaxPathLen >= 0 {
+			numIntermediates := i - 1
+			if numIntermediates > std.MaxPathLen {
+				return fmt.Errorf(
+					"%w (cert %d MaxPathLen=%d, intermediates below=%d)",
+					errPathLenExceeded, i, std.MaxPathLen, numIntermediates,
+				)
+			}
+		}
+	}
+
+	return nil
 }
 
 // buildGOSTChainRec recursively extends the chain from child up to a root,
