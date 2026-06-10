@@ -22,38 +22,47 @@ digest feeds in and how wide the curve is (32-byte vs 64-byte coordinates).
 
 ## Status in this repo
 
-**gogost-backed.** The repo currently sources this primitive from
-`go.stargrave.org/gogost/v7/gost3410` (GPL-3.0, vendored under
-`third_party/gogost/gost3410/`). Every gogost type is wrapped behind opaque
-handles in `internal/gost/`. This document exists to enable a GPL-free
-in-repo reimplementation. The wrapper surface a reimplementation must
-preserve:
+**Clean-room implementation, BSD-2-Clause, zero dependencies.**
+The clean-room reimplementation lives in `gost3410sign/gost3410sign.go`.
+There is no gogost import or any GPL code in this module's dependency graph.
 
-- `internal/gost/exports_gost.go:115` `VerifyDigestOnCurve(curve, pubRaw, digest, sig) (bool, error)`
-- `internal/gost/exports_gost.go:148` `SignDigestOnCurve(curve, prvRaw, digest, rnd) ([]byte, error)`
-- `internal/gost/exports_gost.go:133` `PublicKeyRawFromPrivate(curve, prvRaw) ([]byte, error)`
-- `internal/gost/primitives_gost.go:174` `R342001Verify`, `:189` `R341012Sign`, `:201` `R341012Verify`
-- `internal/gost/primitives_gost.go:53` `CurveByOID(oid)` — the curve resolver.
+Public API (in-package):
 
-### Where the repo uses it
+- `SignDigest(c *curves.Curve, prv, digest, k []byte) []byte`
+- `VerifyDigest(c *curves.Curve, pubRaw, digest, sig []byte) bool`
+- `PublicKeyRaw(c *curves.Curve, prv []byte) []byte`
 
-- **x509gost certificate-chain verification** — `x509gost/verify.go:204` calls
-  `gost.VerifyDigestOnCurve(curve, parent.PubKeyRaw, digest, sig)`. The parent
-  cert's curve is resolved from its parameter OID at `x509gost/verify.go:196`,
-  and the digest is chosen by the child's signature algorithm
-  (`verify.go:180-188`): GOST R 34.11-94 for `AlgoR341001`, Streebog-256 for
-  `AlgoR341012_256`, Streebog-512 for `AlgoR341012_512`. Every GOST TLS
-  certificate flows through this path.
-- **TLS key-exchange** — `tls/internal/ke/vkogost.go` calls
-  `PublicKeyRawFromPrivate` to derive the ephemeral client public key for the
-  VKO key agreement (the signature primitive's `d·P` point multiplication is
-  shared with VKO).
+The root facade (`github.com/bigbes/gostcrypto`) re-exports these through
+`exports.go` (VerifyDigestOnCurve / SignDigestOnCurve / PublicKeyRawFromPrivate2001Test)
+with a thin error-returning wrapper for API compatibility.
+
+### Where the module uses it
+
+- **x509gost certificate-chain verification** — `x509gost/verify.go` calls
+  `gost.VerifyDigestOnCurve` (backed by `VerifyDigest` here). The curve is
+  resolved from the public-key parameter OID; the digest is chosen from the
+  child certificate's signature algorithm OID (GOST R 34.11-94 for
+  `AlgoR341001`, Streebog-256 for `AlgoR341012_256`, Streebog-512 for
+  `AlgoR341012_512`). Every GOST TLS certificate flows through this path.
+- **VKO key exchange** — `vko/vko.go` calls `PublicKeyRaw` (via `ScalarMult`)
+  to derive ephemeral public keys; the `d·P` point multiplication is shared
+  between signature and key-exchange.
 
 This primitive is NOT directly in the record/MAC hot path — it fires once per
 certificate during the handshake. TLS suite IDs that ultimately depend on it:
 `0x0081` (GOST2001-GOST89-GOST89, RFC 4357/legacy), `0xFF85`
-(GOST2012-GOST8912-GOST8912, RFC 9189), and the RFC 9367 suites
+(GOST2012-GOST8912-GOST8912, RFC 9189), and the RFC 9189 suites
 `0xC100`/`0xC101` — all carry GOST-signed server certificates verified here.
+
+### Tests and parity
+
+- **In-package tests:** `gost3410sign/gost3410sign_test.go` (KATs, round-trips),
+  `gost3410sign/rejection_test.go` (rejection paths, fuzz targets).
+- **Differential parity tests** (gogost reference comparison) live in
+  `gostcrypto-compat/parity/gost3410sign/` as `TestDiff_PinnedVector`,
+  `TestDiff_CrossVerifyRandom`, and `FuzzCrossVerify`. Those tests are in the
+  GPL-quarantined `gostcrypto-compat` module and are never compiled into this
+  BSD module.
 
 ---
 
