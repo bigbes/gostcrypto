@@ -27,7 +27,14 @@ func mustHex(t *testing.T, s string) []byte {
 func TestConformance(t *testing.T) {
 	t.Parallel()
 
+	// u128 is 128 × "U" — the canonical published CryptoPro multi-block-aligned vector.
+	// u132 is 132 × "U" — ends in a partial block (132%32 == 4 bytes).
+	// Both verified against gost-engine 3.0.3 (CryptoPro S-box):
+	//   printf 'U%.0s' {1..128} | OPENSSL_CONF=/opt/homebrew/etc/gost/gost-engine.cnf \
+	//     /opt/homebrew/opt/openssl@3/bin/openssl dgst -md_gost94
 	const u128 = "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU" +
+		"UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU"
+	const u132 = "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU" +
 		"UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU"
 
 	cases := []struct {
@@ -45,7 +52,14 @@ func TestConformance(t *testing.T) {
 			"message digest", "message digest",
 			"bc6041dd2aa401ebfa6e9886734174febdb4729aa972d60f549ac39b29721ba0",
 		},
-		{"128*U", u128, "e791faa11d4ab35ffcdb5246db8fe4c3d6802e9eef52be9405c11b69bce108b4"},
+		// 128*U: canonical published multi-block-aligned vector (4 full 32-byte blocks).
+		// Engine-validated (gost-engine 3.0.3, 2026-06-10):
+		//   printf 'U%.0s' {1..128} | OPENSSL_CONF=.../gost-engine.cnf \
+		//     .../openssl dgst -md_gost94
+		{"128*U", u128, "1c4ac7614691bbf427fa2316216be8f10d92edfd37cd1027514c1008f649c4e8"},
+		// 132*U: same but ends in a 4-byte partial block; exercises mixed full+partial
+		// finalization. Engine-validated (gost-engine 3.0.3, 2026-06-10).
+		{"132*U (engine-validated)", u132, "e791faa11d4ab35ffcdb5246db8fe4c3d6802e9eef52be9405c11b69bce108b4"},
 		{
 			"lazy dog", "The quick brown fox jumps over the lazy dog",
 			"9004294a361a508c586fe53d1f1b02746765e71b765472786e4770d565830a76",
