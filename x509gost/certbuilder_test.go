@@ -39,21 +39,41 @@ type buildParams struct {
 	// curveOID is the curve parameter OID in SubjectPublicKeyInfo.Algorithm.Parameters.
 	curveOID asn1.ObjectIdentifier
 
-	// privRaw is the LE-encoded private key used to sign the TBSCertificate.
+	// privRaw is the LE-encoded private key whose curve is curveOID. When no
+	// distinct signer is configured (signerPriv == nil) it both backs the
+	// embedded SPKI and signs the TBSCertificate (self-signed cert).
 	privRaw []byte
 
-	// pubRaw is the LE-encoded public key (LE(Y)||LE(X)) to embed in the SPKI.
+	// pubRaw is the raw public key (LE(X)||LE(Y)) to embed in the SPKI.
 	pubRaw []byte
 
-	// gostAlgo determines which hash to use for signing.
+	// gostAlgo determines which hash to use for signing (the digest implied by
+	// sigAlgoOID). For a CA-signed leaf this is the CA's signature digest, not
+	// the leaf key's strength.
 	gostAlgo GOSTAlgorithm
 
 	// notBefore / notAfter control the validity window.
 	notBefore time.Time
 	notAfter  time.Time
 
-	// commonName is used for both Subject and Issuer.
+	// commonName is the Subject CN. It is also the Issuer CN unless issuerCN
+	// is set.
 	commonName string
+
+	// issuerCN, when non-empty, overrides the Issuer CN (for CA-signed certs
+	// where issuer != subject).
+	issuerCN string
+
+	// signerPriv / signerCurveOID, when set, sign the TBSCertificate with a
+	// distinct CA key on signerCurveOID instead of privRaw/curveOID. This
+	// produces a depth-1 (CA-signed) leaf rather than a self-signed cert.
+	signerPriv     []byte
+	signerCurveOID asn1.ObjectIdentifier
+
+	// extensionsDER, when non-empty, is the pre-encoded [3] EXPLICIT
+	// Extensions field appended to the TBSCertificate (e.g. EKU,
+	// BasicConstraints). Build it with buildExtensionsDER.
+	extensionsDER []byte
 }
 
 // buildCertDER produces a minimal DER-encoded GOST certificate. It encodes
@@ -64,7 +84,7 @@ type buildParams struct {
 func buildCertDER(p buildParams) ([]byte, error) {
 	// ── 1. Build SubjectPublicKeyInfo ────────────────────────────────────────
 	// The public key bytes are wrapped in an OCTET STRING per RFC 4491 §2.1.
-	pubKeyRaw := p.pubRaw // LE(Y)||LE(X).
+	pubKeyRaw := p.pubRaw // LE(X)||LE(Y).
 
 	// Encode raw public key as an OCTET STRING.
 	pubKeyOctetString, err := asn1.Marshal(pubKeyRaw)
@@ -93,34 +113,20 @@ func buildCertDER(p buildParams) ([]byte, error) {
 		return nil, err
 	}
 
-	// ── 2. Build Subject / Issuer (both = CN=test) ───────────────────────────
-	// RDN = SEQUENCE { SET { SEQUENCE { OID(2.5.4.3), UTF8String(commonName) } } }.
-	cnOID := asn1.ObjectIdentifier{2, 5, 4, 3}
-
-	rdnAttr, err := asn1.Marshal(struct {
-		Type  asn1.ObjectIdentifier
-		Value string `asn1:"utf8"`
-	}{cnOID, p.commonName})
+	// ── 2. Build Subject / Issuer ────────────────────────────────────────────
+	// Subject = CN=commonName. Issuer = CN=issuerCN if set, else commonName
+	// (self-signed).
+	subjectSeq, err := buildRDN(p.commonName)
 	if err != nil {
 		return nil, err
 	}
 
-	rdnSet, err := asn1.Marshal(asn1.RawValue{
-		Class:      asn1.ClassUniversal,
-		Tag:        asn1.TagSet,
-		IsCompound: true,
-		Bytes:      rdnAttr,
-	})
-	if err != nil {
-		return nil, err
+	issuerCN := p.issuerCN
+	if issuerCN == "" {
+		issuerCN = p.commonName
 	}
 
-	rdnSeq, err := asn1.Marshal(asn1.RawValue{
-		Class:      asn1.ClassUniversal,
-		Tag:        asn1.TagSequence,
-		IsCompound: true,
-		Bytes:      rdnSet,
-	})
+	issuerSeq, err := buildRDN(issuerCN)
 	if err != nil {
 		return nil, err
 	}
@@ -167,11 +173,16 @@ func buildCertDER(p buildParams) ([]byte, error) {
 		versionBytes,
 		serialBytes,
 		sigAlgoRaw,
-		rdnSeq, // issuer.
+		issuerSeq,
 		validity,
-		rdnSeq, // subject (same as issuer for self-signed).
+		subjectSeq,
 		spki,
 	)
+
+	// Optional extensions: [3] EXPLICIT Extensions.
+	if len(p.extensionsDER) > 0 {
+		tbsBody = append(tbsBody, p.extensionsDER...)
+	}
 
 	tbsDER, err := asn1.Marshal(asn1.RawValue{
 		Class:      asn1.ClassUniversal,
@@ -184,17 +195,27 @@ func buildCertDER(p buildParams) ([]byte, error) {
 	}
 
 	// ── 6. Sign the TBSCertificate ────────────────────────────────────────────.
+	// Sign with the configured CA key (signerPriv/signerCurveOID) when present,
+	// otherwise self-sign with privRaw/curveOID.
+	signPriv := p.privRaw
+	signCurveOID := p.curveOID
+
+	if p.signerPriv != nil {
+		signPriv = p.signerPriv
+		signCurveOID = p.signerCurveOID
+	}
+
 	digest, err := hashForSign(p.gostAlgo, tbsDER)
 	if err != nil {
 		return nil, err
 	}
 
-	curve, err := gost.CurveByOID(p.curveOID)
+	curve, err := gost.CurveByOID(signCurveOID)
 	if err != nil {
 		return nil, err
 	}
 
-	sig, err := gost.SignDigestOnCurve(curve, p.privRaw, digest, rand.Reader)
+	sig, err := gost.SignDigestOnCurve(curve, signPriv, digest, rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +249,13 @@ func buildCertDER(p buildParams) ([]byte, error) {
 	return certDER, nil
 }
 
-// hashForSign hashes data with the hash algorithm implied by algo.
+// hashForSign hashes data with the hash algorithm implied by algo and returns
+// the digest in the little-endian byte order the GOST signing/verification math
+// consumes (gost.SignDigestOnCurve / VerifyDigestOnCurve read the digest as the
+// big-endian integer "alpha"; the natural hash.Sum output is the reverse). This
+// matches what OpenSSL+gost-engine puts on the wire — confirmed by
+// TestVerify_GOST_ExternalFixture — so certs built here verify under the same
+// digest convention as externally-produced certs.
 func hashForSign(algo GOSTAlgorithm, data []byte) ([]byte, error) {
 	var h interface {
 		Write([]byte) (int, error)
@@ -248,7 +275,148 @@ func hashForSign(algo GOSTAlgorithm, data []byte) ([]byte, error) {
 
 	_, _ = h.Write(data)
 
-	return h.Sum(nil), nil
+	digest := h.Sum(nil)
+
+	digestLE := make([]byte, len(digest))
+	for i := range digest {
+		digestLE[len(digest)-1-i] = digest[i]
+	}
+
+	return digestLE, nil
+}
+
+// buildRDN encodes a Name with a single CN attribute:
+// SEQUENCE { SET { SEQUENCE { OID(2.5.4.3), UTF8String(cn) } } }.
+func buildRDN(cn string) ([]byte, error) {
+	cnOID := asn1.ObjectIdentifier{2, 5, 4, 3}
+
+	rdnAttr, err := asn1.Marshal(struct {
+		Type  asn1.ObjectIdentifier
+		Value string `asn1:"utf8"`
+	}{cnOID, cn})
+	if err != nil {
+		return nil, err
+	}
+
+	rdnSet, err := asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassUniversal,
+		Tag:        asn1.TagSet,
+		IsCompound: true,
+		Bytes:      rdnAttr,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassUniversal,
+		Tag:        asn1.TagSequence,
+		IsCompound: true,
+		Bytes:      rdnSet,
+	})
+}
+
+// extensionParams describes the X.509 v3 extensions to embed in a test cert.
+type extensionParams struct {
+	// isCA, when set, emits a critical BasicConstraints extension with the
+	// given CA flag.
+	setBasicConstraints bool
+	isCA                bool
+
+	// keyUsageCertSign, when set, emits a KeyUsage extension asserting
+	// keyCertSign (bit 5).
+	keyUsageCertSign bool
+
+	// ekuOIDs, when non-empty, emits an ExtKeyUsage extension listing them.
+	ekuOIDs []asn1.ObjectIdentifier
+}
+
+// buildExtensionsDER builds the [3] EXPLICIT Extensions field for a
+// TBSCertificate from the given params. Returns nil if no extension is set.
+func buildExtensionsDER(p extensionParams) ([]byte, error) {
+	var extns [][]byte
+
+	if p.setBasicConstraints {
+		bcVal, err := asn1.Marshal(struct {
+			CA bool `asn1:"optional"`
+		}{p.isCA})
+		if err != nil {
+			return nil, err
+		}
+
+		ext, err := marshalExtension(asn1.ObjectIdentifier{2, 5, 29, 19}, true, bcVal)
+		if err != nil {
+			return nil, err
+		}
+
+		extns = append(extns, ext)
+	}
+
+	if p.keyUsageCertSign {
+		// KeyUsage BIT STRING with bit 5 (keyCertSign) set.
+		ku := asn1.BitString{Bytes: []byte{0x04}, BitLength: 6}
+
+		kuVal, err := asn1.Marshal(ku)
+		if err != nil {
+			return nil, err
+		}
+
+		ext, err := marshalExtension(asn1.ObjectIdentifier{2, 5, 29, 15}, true, kuVal)
+		if err != nil {
+			return nil, err
+		}
+
+		extns = append(extns, ext)
+	}
+
+	if len(p.ekuOIDs) > 0 {
+		ekuVal, err := asn1.Marshal(p.ekuOIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		ext, err := marshalExtension(asn1.ObjectIdentifier{2, 5, 29, 37}, false, ekuVal)
+		if err != nil {
+			return nil, err
+		}
+
+		extns = append(extns, ext)
+	}
+
+	if len(extns) == 0 {
+		return nil, nil
+	}
+
+	// Extensions ::= SEQUENCE OF Extension.
+	seq, err := asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassUniversal,
+		Tag:        asn1.TagSequence,
+		IsCompound: true,
+		Bytes:      concatBytes(extns...),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// [3] EXPLICIT.
+	return asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassContextSpecific,
+		Tag:        3,
+		IsCompound: true,
+		Bytes:      seq,
+	})
+}
+
+// marshalExtension builds one Extension: SEQUENCE { extnID OID, critical
+// BOOLEAN DEFAULT FALSE, extnValue OCTET STRING }.
+func marshalExtension(oid asn1.ObjectIdentifier, critical bool, value []byte) ([]byte, error) {
+	type extension struct {
+		ID       asn1.ObjectIdentifier
+		Critical bool `asn1:"optional"`
+		Value    []byte
+	}
+
+	return asn1.Marshal(extension{ID: oid, Critical: critical, Value: value})
 }
 
 // concatBytes concatenates byte slices.
