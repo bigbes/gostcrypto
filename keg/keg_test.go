@@ -3,11 +3,13 @@ package keg_test
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"testing"
 
 	"github.com/bigbes/gostcrypto/gost3410curves"
 	"github.com/bigbes/gostcrypto/keg"
+	"github.com/bigbes/gostcrypto/vko"
 )
 
 func mustHex(t *testing.T, s string) []byte {
@@ -144,6 +146,7 @@ func TestKEG2012_256_ZeroUKM(t *testing.T) {
 // digest), and the downstream KExp15 IV is read from ukm_source[24:24+ivLen],
 // so any other length is malformed. Earlier the package accepted any length
 // >= 24 and silently ignored extra bytes; now 23..31 and 33 all error.
+// Each wrong-length call must return keg.ErrUKMSourceLen specifically.
 func TestKEG2012_256_UKMLen(t *testing.T) {
 	t.Parallel()
 
@@ -151,8 +154,11 @@ func TestKEG2012_256_UKMLen(t *testing.T) {
 	priv := mustHex(t, privAHex)
 
 	for _, n := range []int{0, 16, 23, 24, 31, 33, 64} {
-		if _, err := keg.KEG2012_256(nil, pub, priv, make([]byte, n)); err == nil {
+		_, err := keg.KEG2012_256(nil, pub, priv, make([]byte, n))
+		if err == nil {
 			t.Errorf("ukm_source length %d: expected error, got nil", n)
+		} else if !errors.Is(err, keg.ErrUKMSourceLen) {
+			t.Errorf("ukm_source length %d: want errors.Is(err, keg.ErrUKMSourceLen), got %v", n, err)
 		}
 	}
 
@@ -169,9 +175,18 @@ func TestKEG2012_256_UKMLen(t *testing.T) {
 // byte-position slip (realUKM[0]=1 instead of realUKM[15]=1) that pair-symmetry
 // and "differs from non-zero" alone would miss (KEG-36).
 //
-// Source: the gogost-backed reference gostcryptocompat.KEG2012_256 (the de-facto
-// spec this module matches), computed on 2026-06-10 with privAHex/pubBHex and a
-// 32-byte zero ukm_source on curve OID 1.2.643.7.1.2.1.1.1.
+// Vector confirmed against gost-engine 3.0.3 via OpenSSL 3 on 2026-06-10
+// (both A→B and B→A directions produce this same 64 bytes):
+//
+//	OPENSSL_CONF=/opt/homebrew/etc/gost/gost-engine.cnf \
+//	  /opt/homebrew/opt/openssl@3/bin/openssl pkeyutl -derive -engine gost \
+//	    -inkey privA_tc26.pem -peerkey pubB_tc26.pem \
+//	    -pkeyopt ukmhex:0000000000000000000000000000000000000000000000000000000000000000
+//
+// PEM files constructed by encoding privAHex/privBHex (LE) as PKCS8 OCTET
+// STRING with OID 1.2.643.7.1.2.1.1.1 (TC26 256-bit ParamSet A); public keys
+// derived via -pubout.  Previously sourced from gostcryptocompat.KEG2012_256;
+// the engine output is byte-for-byte identical.
 const zeroUKMWantHex = "1f28179da81185e6019a6bc43568b9d8be3788111c50dff78b2a04259f8ecc73" +
 	"ddc39fe3d635dc2ffd7071286d4d074421307548b847dbb88039b94015382a6e"
 
@@ -196,7 +211,8 @@ func TestKEG2012_256_ZeroUKM_KAT(t *testing.T) {
 // TestKEG2012_256_BadKeys pins keg's pass-through error contract for malformed
 // key material (KEG-37): wrong-length / off-curve public key, wrong-length /
 // zero private key. Each must return an error (not panic, not output); the
-// errors originate in the vko sibling and propagate unchanged.
+// errors originate in the vko sibling and propagate unchanged, so the specific
+// vko sentinel is testable via errors.Is.
 func TestKEG2012_256_BadKeys(t *testing.T) {
 	t.Parallel()
 
@@ -211,24 +227,30 @@ func TestKEG2012_256_BadKeys(t *testing.T) {
 	offCurvePub[0] ^= 0xff
 
 	cases := []struct {
-		name string
-		pub  []byte
-		priv []byte
+		name    string
+		pub     []byte
+		priv    []byte
+		wantErr error // specific sentinel propagated unchanged from vko.
 	}{
-		{"short_pub_63", goodPub[:63], goodPriv},
-		{"long_pub_65", append(append([]byte(nil), goodPub...), 0x00), goodPriv},
-		{"off_curve_pub", offCurvePub, goodPriv},
-		{"short_priv_31", goodPub, goodPriv[:31]},
-		{"long_priv_33", goodPub, append(append([]byte(nil), goodPriv...), 0x00)},
-		{"zero_priv", goodPub, make([]byte, 32)},
+		{"short_pub_63", goodPub[:63], goodPriv, vko.ErrBadPubLen},
+		{"long_pub_65", append(append([]byte(nil), goodPub...), 0x00), goodPriv, vko.ErrBadPubLen},
+		{"off_curve_pub", offCurvePub, goodPriv, vko.ErrPubNotOn},
+		{"short_priv_31", goodPub, goodPriv[:31], vko.ErrBadPrivLen},
+		{"long_priv_33", goodPub, append(append([]byte(nil), goodPriv...), 0x00), vko.ErrBadPrivLen},
+		{"zero_priv", goodPub, make([]byte, 32), vko.ErrZeroPrivate},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if _, err := keg.KEG2012_256(nil, tc.pub, tc.priv, ukm); err == nil {
+			_, err := keg.KEG2012_256(nil, tc.pub, tc.priv, ukm)
+			if err == nil {
 				t.Fatalf("%s: expected error, got nil", tc.name)
+			}
+
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("%s: want errors.Is(err, %v), got %v", tc.name, tc.wantErr, err)
 			}
 		})
 	}
@@ -332,8 +354,9 @@ func TestKEG2012_256_CurveHonored(t *testing.T) {
 	}
 }
 
-// TestKEG2012_256_Reject512 pins that a 512-bit curve is rejected with an error
-// rather than silently running the wrong (256-bit) algorithm on it (KEG-34).
+// TestKEG2012_256_Reject512 pins that a 512-bit curve is rejected with
+// keg.ErrCurve512 rather than silently running the wrong (256-bit) algorithm
+// on it (KEG-34).
 func TestKEG2012_256_Reject512(t *testing.T) {
 	t.Parallel()
 
@@ -347,5 +370,9 @@ func TestKEG2012_256_Reject512(t *testing.T) {
 	_, err = keg.KEG2012_256(c512, make([]byte, 128), make([]byte, 64), mustHex(t, ukmHex))
 	if err == nil {
 		t.Fatal("expected error for 512-bit curve, got nil")
+	}
+
+	if !errors.Is(err, keg.ErrCurve512) {
+		t.Errorf("512-bit curve: want errors.Is(err, keg.ErrCurve512), got %v", err)
 	}
 }

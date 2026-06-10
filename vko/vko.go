@@ -78,11 +78,16 @@ func big2leFixed(n *big.Int, size int) []byte {
 // ---------------------------------------------------------------------------.
 
 var (
-	errZeroPrivate         = errors.New("vko: private key is zero mod q")
-	errBadPubLen           = errors.New("vko: public key has wrong length")
-	errBadPrivLen          = errors.New("vko: private key has wrong length")
+	// ErrZeroPrivate is returned when the private key scalar is zero mod q.
+	ErrZeroPrivate = errors.New("vko: private key is zero mod q")
+	// ErrBadPubLen is returned when the public key has the wrong byte length.
+	ErrBadPubLen = errors.New("vko: public key has wrong length")
+	// ErrBadPrivLen is returned when the private key has the wrong byte length.
+	ErrBadPrivLen = errors.New("vko: private key has wrong length")
+	// ErrPubNotOn is returned when the public point is not on the curve.
+	ErrPubNotOn = errors.New("vko: public point is not on the curve")
+
 	errZeroUKM             = errors.New("vko: UKM is zero")
-	errPubNotOn            = errors.New("vko: public point is not on the curve")
 	errIdentity            = errors.New("vko: agreement point is the identity")
 	errDerivedID           = errors.New("vko: derived public point is the identity")
 	errUnsupportedCofactor = errors.New("vko: unsupported cofactor (only 1 and 4 are valid for GOST curves)")
@@ -93,18 +98,18 @@ var (
 func loadPrivateLE(c *gost3410curves.Curve, raw []byte) (*big.Int, error) {
 	size := c.PointSize()
 	if len(raw) != size {
-		return nil, errBadPrivLen
+		return nil, ErrBadPrivLen
 	}
 
 	d := leBytes2big(raw)
 	if d.Sign() == 0 {
-		return nil, errZeroPrivate
+		return nil, ErrZeroPrivate
 	}
 
 	d.Mod(d, c.Q)
 
 	if d.Sign() == 0 {
-		return nil, errZeroPrivate
+		return nil, ErrZeroPrivate
 	}
 
 	return d, nil
@@ -115,7 +120,7 @@ func loadPrivateLE(c *gost3410curves.Curve, raw []byte) (*big.Int, error) {
 func loadPublicLE(c *gost3410curves.Curve, raw []byte) (gost3410curves.Point, error) {
 	size := c.PointSize()
 	if len(raw) != 2*size {
-		return gost3410curves.Point{}, errBadPubLen
+		return gost3410curves.Point{}, ErrBadPubLen
 	}
 
 	x := leBytes2big(raw[:size])
@@ -123,7 +128,7 @@ func loadPublicLE(c *gost3410curves.Curve, raw []byte) (gost3410curves.Point, er
 	p := gost3410curves.Point{X: x, Y: y}
 
 	if !c.IsOnCurve(p) {
-		return gost3410curves.Point{}, errPubNotOn
+		return gost3410curves.Point{}, ErrPubNotOn
 	}
 
 	return p, nil
