@@ -301,6 +301,7 @@ func GenerateEphemeralKey(curve *Curve, rnd io.Reader) (privRaw, pubRaw []byte, 
 	}
 
 	priv := big2leFixed(d, ps)
+
 	pub := gost3410sign.PublicKeyRaw(curve.inner, priv)
 	if pub == nil {
 		return nil, nil, errEphemeralZeroKey

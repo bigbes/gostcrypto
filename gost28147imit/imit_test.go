@@ -285,7 +285,7 @@ func TestIMIT_TC26Z_1032B_Mesh(t *testing.T) {
 	// Full 8-byte tag via internal imit() with tc26-Z S-box.
 	// Source: gost-engine v3.0.3 gost-mac-12 CLI oracle, 2026-06-10 (see above).
 	wantFull := mustHex(t, "d498623c81b21a86")
-	wantTLS := wantFull[:4] // "d498623c"
+	wantTLS := wantFull[:4] // "d498623c".
 
 	got := imit(key, msg, gost28147.SboxTC26Z)
 
