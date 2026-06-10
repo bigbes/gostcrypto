@@ -7,15 +7,15 @@ reading `go.stargrave.org/gogost/v7` (GPL-3.0, vendored at
 
 *Intended implementer: a Sonnet-class coding agent — every constant, S-box, parameter table, and edge case is inlined so this primitive can be built without consulting gogost or external specs.*
 
-**Status: in-repo reimplementation.** This primitive is **not** sourced from
-gogost. gogost's `gost3413` package contains only `padding.go` — it has no CTR
-and no ACPKM. The repo provides its own CTR + ACPKM in
-`internal/gost/ctr_gost.go` (`NewCTR`, `NewCTRACPKM`), layered over any
-`crypto/cipher.Block` (the block cipher itself — Kuznyechik `gost3412128`,
-Magma `gost341264` — still comes from gogost, but that is a *separate*
-primitive with its own guide). The de-facto spec this file documents is the
-behavioral contract in `internal/gost/ctr_gost.go`, cross-checked against
-gost-engine v3.0.3 (Tarantool's upstream) and RFC 8645.
+**Status: clean-room implementation.** This primitive is implemented in
+`ctracpkm/ctracpkm.go` (`NewCTR`, `NewCTRACPKM`), BSD-2-Clause, zero
+third-party dependencies. It imports no gogost and carries no build tags.
+The block ciphers (Kuznyechik, Magma) are in-repo clean-room implementations
+in `kuznyechik/` and `magma/`. The parity gate for this primitive lives in
+`../gostcrypto-compat/parity/ctracpkm/` (gogost has no CTR/ACPKM, so the
+compat module uses an internal oracle; the official R 1323565.1.017-2018
+Appendix A.1 KATs are the primary external anchors). The de-facto spec this
+file documents is cross-checked against gost-engine v3.0.3 and RFC 8645.
 
 ## What it is
 
@@ -31,24 +31,19 @@ the current key. The counter is **not** reset by ACPKM — only the key changes.
 This bounds the amount of data processed under any single key without renewing
 the master key.
 
-### Where this repo uses it
+### Where this module uses it
 
-- **TLS record protection for RFC 9367 GOST suites** — Kuznyechik-CTR-ACPKM
-  + OMAC (TLS suite `0xC100`) and Magma-CTR-ACPKM + OMAC (`0xC101`). The
-  protector is `ctrOMACProtector` in
-  `tls/internal/record/protection_ctromac_gost.go`; it calls
-  `gost.NewCTRACPKM` once per record in both `Seal` (line 205) and `Open`
-  (line 250). Wire format: `CTR(plaintext) || CTR(OMAC-tag)` as one
-  continuous keystream.
-- **Plain CTR (no ACPKM)** is also used inside the kexp15 key-export wrapper:
-  `internal/gost/kexp15_gost.go:123` calls `NewCTR`, and
-  `internal/gost/primitives_gost.go:391` returns a plain CTR stream.
+- **Exported constants** `ctracpkm.SectionKuznyechik` (4096) and
+  `ctracpkm.SectionMagma` (1024) document the TLS per-suite section sizes
+  (RFC 9367 suites `0xC100`/`0xC101`). The downstream consumer
+  (`github.com/bigbes/gostls`) uses `NewCTRACPKM` once per TLS record for
+  both the plaintext keystream and the OMAC-tag keystream.
+- **Plain CTR (no ACPKM)** is consumed by `kexp15/kexp15.go` (KExp15 key
+  export) and by the root facade (`modes.go`).
 
-Per-suite section sizes wired in the protector:
-`acpkmSection = 4096` for Kuznyechik
-(`protection_ctromac_gost.go:99`, citing
-`tmp/engine/gost_grasshopper_cipher.c:334`) and `1024` for Magma
-(`protection_ctromac_gost.go:135`, citing `tmp/engine/gost_crypt.c:517`).
+Per-suite section sizes:
+`SectionKuznyechik = 4096` (citing `tmp/engine/gost_grasshopper_cipher.c:334`)
+and `SectionMagma = 1024` (citing `tmp/engine/gost_crypt.c:517`).
 
 ## Specification
 
@@ -122,7 +117,7 @@ concatenation of the `J` ciphertext blocks (exactly 32 bytes) becomes the next
 section key. `MSB_k` is a no-op here because the concatenation is already
 exactly `k = 32` bytes.
 
-Repo constant: `acpkmD` (`internal/gost/ctr_gost.go:32-37`). Engine constants:
+Repo constant: `acpkmD` (`ctracpkm/ctracpkm.go`). Engine constants:
 `ACPKM_D_const` (`tmp/engine/gost89.c:247-252`, used by Magma) and
 `ACPKM_D_2018` (`tmp/engine/gost_grasshopper_cipher.c:155-160`, used by
 Kuznyechik) — **byte-for-byte identical**.
@@ -136,9 +131,9 @@ key `K^1 = K`; before encrypting section `i+1` the key is advanced
 `K^{i+1} = ACPKM(K^i)`. The counter keeps running across section boundaries
 (it is **never** reset by ACPKM).
 
-`internal/gost/ctr_gost.go` requires `sectionSize % blockSize == 0`
-(line 103) and `sectionSize == 0` disables ACPKM entirely, degrading to plain
-CTR (`NewCTRACPKM(..., 0)` ≡ `NewCTR`; asserted by
+`ctracpkm/ctracpkm.go` requires `sectionSize % blockSize == 0` and
+`sectionSize == 0` disables ACPKM entirely, degrading to plain CTR
+(`NewCTRACPKM(..., 0)` ≡ `NewCTR`; asserted by
 `TestCTRACPKM_MatchesPlainCTR_WhenSectionZero`).
 
 ### ACPKM-Master (RFC 8645 §6.3.1) — informational
@@ -150,8 +145,9 @@ For deriving multiple keys (not used by the TLS suites but exercised by the
 
 i.e. run CTR-ACPKM with section size `T*` over a zero buffer of length
 `d*l` bits, starting counter `1^{n/2}` (high half all-ones). The repo
-`Kuznyechik-CTR-ACPKM-Master-96` test (`cipher_modes_test.go:176`) reproduces
-exactly this: 144 zero bytes, IV = 8 bytes of `0xFF`, section size 96.
+`TestCTRACPKM_Kuznyechik_Master768` test (`ctracpkm/ctracpkm_test.go`)
+reproduces exactly this: 144 zero bytes, IV = 8 bytes of `0xFF`, section
+size 96.
 
 ## RFC ↔ implementation deltas
 
@@ -165,34 +161,32 @@ repo, the parity target) actually does.
    least-significant half. A reimplementer who places the nonce in the low
    bytes (little-endian intuition — GOST is little-endian in *many* places,
    e.g. key/curve scalars) will get wrong gamma from block 2 onward.
-   Reference: `adjustIV` lays nonce into `out[0:n/2]`, zeros `out[n/2:n]`
-   (`protection_ctromac_gost.go:154-172`); increment touches the tail first
-   (`incCounter`, `ctr_gost.go:167-174`; engine `inc_counter`,
-   `gost_grasshopper_cipher.c:581-594`). The repo test
-   `TestCTR_CounterIncrement` (`ctr_test.go:121`) pins this: block 2's gamma
-   must equal a fresh CTR seeded at `IV+1`.
+   In-repo: `NewCTR`/`NewCTRACPKM` take the full n-byte counter already
+   assembled (nonce in high `n/2`, zeros in low `n/2`); `incCounter`
+   (`ctracpkm/ctracpkm.go`) touches the tail first. Engine reference:
+   `inc_counter` (`tmp/engine/gost_grasshopper_cipher.c:581-594`). The test
+   `TestCTR_CounterIncrement` (`ctracpkm/ctracpkm_test.go`) pins this:
+   block 2's gamma must equal a fresh CTR seeded at `IV+1`.
 
 2. **ACPKM rekeys BEFORE generating the first block of the new section, not
    after the last block of the old one** — and the threshold is `>=`, evaluated
    at block boundaries. Engine `apply_acpkm_grasshopper`
-   (`gost_grasshopper_cipher.c:660-667`) and `apply_acpkm_magma`
-   (`gost_crypt.c:814-821`): `if (!section_size || *num < section_size) return;
+   (`tmp/engine/gost_grasshopper_cipher.c:660-667`) and `apply_acpkm_magma`
+   (`tmp/engine/gost_crypt.c:814-821`): `if (!section_size || *num < section_size) return;
    acpkm_next(); *num &= BLOCK_MASK;` — the check fires when the per-section
    byte counter `num` reaches `section_size`, *just before* the block encrypt
    inside the per-block loop. Repo mirror: `XORKeyStream`
-   (`ctr_gost.go:140-156`) checks `c.sinceRekey >= c.sectionSize` at the top of
-   each new-gamma-block path, rekeys, then resets `sinceRekey = 0`. Getting
-   this off-by-one wrong (rekeying after, or using `>` ) shifts every section
+   (`ctracpkm/ctracpkm.go`) checks `c.sinceRekey >= c.sectionSize` at the top
+   of each new-gamma-block path, rekeys, then resets `sinceRekey = 0`. Getting
+   this off-by-one wrong (rekeying after, or using `>`) shifts every section
    boundary and silently corrupts everything past the first section. Pinned by
-   `Kuznyechik-CTR-ACPKM-32` (`cipher_modes_test.go:154`), section size 32, 112
-   bytes = 3.5 sections.
+   `TestCTRACPKM_Kuznyechik_Section32` (`ctracpkm/ctracpkm_test.go`), section
+   size 32, 112 bytes = 3.5 sections.
 
 3. **ACPKM does NOT reset the counter** — RFC 8645 §6.2.1 advances only the
    key; the counter is continuous across sections. The engine's
    `*num &= BLOCK_MASK` clears only the *intra-block* offset bookkeeping, not
-   the IV. Repo comment makes this explicit: "The counter IV is NOT reset by
-   ACPKM — only by the TLSTree ctrl at record boundaries"
-   (`ctr_gost.go:84-85`); `rekeyACPKM` (`ctr_gost.go:122-129`) replaces only
+   the IV. Repo: `rekeyACPKM` (`ctracpkm/ctracpkm.go`) replaces only
    `c.block`, never `c.iv`. A reimplementer who re-zeros the counter on rekey
    will diverge after the first section.
 
@@ -200,10 +194,11 @@ repo, the parity target) actually does.
    for both encrypt and decrypt of the stream.** CTR is a stream cipher:
    decryption is the same XOR with the same gamma, so the block cipher is
    always used in *encrypt* mode, including inside ACPKM (`acpkm_next` calls
-   `grasshopper_encrypt_block`, `gost_grasshopper_cipher.c:171`;
-   `acpkm_magma_key_meshing` calls `magmacrypt` =
-   encrypt, `gost89.c:773`). Repo: `rekeyACPKM` calls `c.block.Encrypt`
-   (`ctr_gost.go:126`). Never use `Decrypt` here.
+   `grasshopper_encrypt_block`,
+   `tmp/engine/gost_grasshopper_cipher.c:171`; `acpkm_magma_key_meshing`
+   calls `magmacrypt` = encrypt, `tmp/engine/gost89.c:773`). Repo:
+   `rekeyACPKM` calls `c.block.Encrypt` (`ctracpkm/ctracpkm.go`). Never use
+   `Decrypt` here.
 
 5. **`D` is identical for Magma and Kuznyechik; the two engine symbols are a
    copy.** `ACPKM_D_const` (Magma, `gost89.c:247`) and `ACPKM_D_2018`
@@ -240,7 +235,7 @@ repo, the parity target) actually does.
 
 ### Inline runnable vector (Kuznyechik CTR-ACPKM, section size 32)
 
-From `internal/gost/cipher_modes_test.go:154` (`Kuznyechik-CTR-ACPKM-32`),
+From `TestCTRACPKM_Kuznyechik_Section32` (`ctracpkm/ctracpkm_test.go`),
 ported from `tmp/engine/test_ciphers.c`. Section size 32 forces 3 rekeys over
 112 bytes — a complete end-to-end ACPKM exercise.
 
@@ -274,8 +269,8 @@ below, whose first 32 bytes are `f195d8be...3c45dee4`.
 
 ### Magma ACPKM key-meshing KAT (K2)
 
-From `internal/gost/magma_acpkm_test.go:39`
-(`tmp/engine/test_gost89.c:60`). Verifies one ACPKM transform in isolation:
+From `TestACPKM_Magma_K2` (`ctracpkm/ctracpkm_test.go`; source:
+`tmp/engine/test_gost89.c:60`). Verifies one ACPKM transform in isolation:
 
 ```
 K  (32B): 8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef
@@ -285,18 +280,18 @@ K2 (32B): 863ea017842c3d372b18a85a28e2317d74befc107720de0c9e8ab974abd00ca0
 
 ### Plain CTR KATs (no ACPKM)
 
-- Kuznyechik CTR, GOST R 34.13-2015 A.1.2 — `ctr_test.go:40`
-  (`TestCTR_Kuznyechik_KAT`). Same key/plaintext as above (the first 64
-  plaintext bytes); expected ciphertext (64 bytes, pinned in full by
-  `ctr_test.go:54-57`):
+- Kuznyechik CTR, GOST R 34.13-2015 A.1.2 (Table A.2) — `TestCTR_Kuznyechik_KAT`
+  (`ctracpkm/ctracpkm_test.go`). Same key/plaintext as above (the first 64
+  plaintext bytes); expected ciphertext (64 bytes, all four blocks from the
+  standard):
   ```
   f195d8bec10ed1dbd57b5fa240bda1b8
   85eee733f6a13e5df33ce4b33c45dee4
   a5eae88be6356ed3d5e877f13564a3a5
   cb91fab1f20cbab6d1c6d15820bdba73
   ```
-- Magma CTR, GOST R 34.13-2015 A.2.2 — `ctr_test.go:83`
-  (`TestCTR_Magma_KAT`):
+- Magma CTR, GOST R 34.13-2015 A.2.2 — `TestCTR_Magma_KAT`
+  (`ctracpkm/ctracpkm_test.go`):
   ```
   key:        ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
   IV (8B):    1234567800000000   (4-byte nonce zero-padded)
@@ -306,12 +301,15 @@ K2 (32B): 863ea017842c3d372b18a85a28e2317d74befc107720de0c9e8ab974abd00ca0
 
 ### Other coverage
 
-- `TestCTR_CounterIncrement` (`ctr_test.go:121`) — big-endian carry.
-- `TestCTR_PartialBlock` (`ctr_test.go:188`) — split-write == one-shot.
-- `TestCTRACPKM_Roundtrip` (`ctr_test.go:217`) — 3.5 sections, encrypt/decrypt
-  agree, for both ciphers.
-- `Kuznyechik-CTR-ACPKM-Master-96` (`cipher_modes_test.go:176`) — ACPKM-Master,
-  144 zero bytes, IV `ff*8`, N=96.
+- `TestCTR_CounterIncrement` (`ctracpkm/ctracpkm_test.go`) — big-endian carry.
+- `TestCTR_PartialBlock` (`ctracpkm/ctracpkm_test.go`) — split-write == one-shot.
+- `TestCTRACPKM_Roundtrip_BothCiphers` (`ctracpkm/ctracpkm_test.go`) — 3.5
+  sections, encrypt/decrypt agree, for both ciphers.
+- `TestCTRACPKM_Kuznyechik_Master768` (`ctracpkm/ctracpkm_test.go`) —
+  ACPKM-Master, 144 zero bytes, IV `ff*8`, N=96.
+- `TestCTRACPKM_Magma_OfficialA1` (`ctracpkm/ctracpkm_test.go`) — official
+  R 1323565.1.017-2018 Appendix A.1 Magma CTR-ACPKM end-to-end KAT
+  (N=16, 56 bytes, 3 rekeys), one-shot and split-write.
 
 ## Re-implementation checklist
 
@@ -322,12 +320,13 @@ Each step is independently testable against a vector above.
    Verify with the ECB KAT in `cipher_modes_test.go:85` if available.
 2. **Counter increment.** Implement big-endian `incCounter`: from the last
    byte upward, `++`, stop on no-wrap. Test: incrementing `...FF` rolls the
-   carry into the next-higher byte.
+   carry into the next-higher byte. See `TestCTR_CounterIncrement`.
 3. **Plain CTR.** Build CTR over a full `n`-byte counter (nonce in high `n/2`,
    zeros in low `n/2`): per block, `gamma = E(counter)`, increment, XOR.
    Carry the partial-block offset (`num`) across `XORKeyStream` calls.
    Verify against the Magma and Kuznyechik plain-CTR KATs and
-   `TestCTR_CounterIncrement` / `TestCTR_PartialBlock`.
+   `TestCTR_CounterIncrement` / `TestCTR_PartialBlock`
+   (`ctracpkm/ctracpkm_test.go`).
 4. **ACPKM constant.** Hard-code the 32 bytes `0x80`…`0x9F`. Verify it equals
    the first 32 bytes of RFC 8645's `D`.
 5. **ACPKM transform.** `rekey(K)`: for `i` in `0, n, 2n, ...` up to 32, set
@@ -338,239 +337,160 @@ Each step is independently testable against a vector above.
    `sectionSize > 0 && sinceRekey >= sectionSize`: rekey, reset
    `sinceRekey = 0`. Do NOT reset the counter. Require
    `sectionSize % blockSize == 0`; `sectionSize == 0` ⇒ plain CTR. Verify
-   against `Kuznyechik-CTR-ACPKM-32` and that N=0 matches plain CTR.
+   against `TestCTRACPKM_Kuznyechik_Section32`, `TestCTRACPKM_Magma_OfficialA1`,
+   and that N=0 matches plain CTR.
 7. **Round-trip.** Confirm decrypt = encrypt (same gamma) over multiple
-   sections, both ciphers (`TestCTRACPKM_Roundtrip`).
+   sections, both ciphers (`TestCTRACPKM_Roundtrip_BothCiphers`,
+   `ctracpkm/ctracpkm_test.go`).
 8. **TLS counter assembly (only if wiring the record layer).** High `n/2`
    bytes = record nonce + sequence number (big-endian carry add); low `n/2`
-   bytes = 0. See `adjustIV` (`protection_ctromac_gost.go:154`).
+   bytes = 0. The downstream gostls module handles this in its record layer.
 
 ## Conformance & fuzz testing
 
 This primitive has **no gogost reference to diff against** — gogost ships no
-CTR and no ACPKM (`third_party/gogost/gost3413/` is `padding.go` only). The
-clean-room differential strategy therefore has three reference targets: (1) the
-in-repo `internal/gost.NewCTR` / `NewCTRACPKM` (the de-facto spec); (2) the
-pinned hex vectors already in this doc (KATs, primary anchor); and (3) the
-gost-engine CLI oracle for randomized cross-checks — shelled out, since the
-engine exposes no Go API for CTR-ACPKM. Because CTR is a stream cipher,
+CTR and no ACPKM. The clean-room differential strategy therefore has three
+reference targets: (1) the pinned hex vectors already in this doc (KATs,
+primary anchor); (2) the `../gostcrypto-compat/parity/ctracpkm/` oracle which
+builds an internal reference from `gostcrypto-compat/ctr_gost.go`; and (3)
+the gost-engine CLI oracle for spot-checks. Because CTR is a stream cipher,
 the cheapest invariant for fuzzing is **encrypt/decrypt round-trip** (the same
-gamma decrypts what it encrypted); the stronger check is byte-equality of the
-clean-room keystream against the in-repo impl. Fuzz random key + IV + an
+gamma decrypts what it encrypted). Fuzz random key + IV + an
 **arbitrary-length stream long enough to cross several ACPKM section
 boundaries** (drive `sectionSize` small — e.g. one or two blocks — so a few
 hundred bytes already exercises multiple rekeys).
 
-Replace `mynew` with your clean-room package. Its constructors must match the
-in-repo signatures verbatim:
-`NewCTR(block cipher.Block, iv []byte) (*CTR, error)` and
-`NewCTRACPKM(newBlock func([]byte) cipher.Block, key, iv []byte, sectionSize int) (*CTR, error)`,
-each yielding a value with `XORKeyStream(dst, src []byte)`
-(`internal/gost/ctr_gost.go:57,86,134`). `newBlock` must return your own
-Kuznyechik/Magma `cipher.Block`; the in-repo tests key it off gogost's
-`gost3412128.NewCipher` / `gost341264.NewCipher` (`ctr_test.go:227-229`) —
-use whichever block impl your clean-room build owns on the reference side.
+The actual module API is:
+- `NewCTR(block cipher.Block, iv []byte) cipher.Stream` — panics on bad
+  input, returns `cipher.Stream` (not `(*CTR, error)`).
+- `NewCTRACPKM(newBlock func([]byte) cipher.Block, key, iv []byte, sectionSize int) cipher.Stream`
+  — same panic-on-bad-input contract; zero `sectionSize` = plain CTR.
+
+`newBlock` accepts a 32-byte key and must return a `cipher.Block` whose
+`BlockSize()` divides 32 (enforced at construction). Use the in-repo
+`kuznyechik.NewCipher` / `magma.NewCipher` for block cipher construction.
 
 ### KAT conformance (seeded from this doc's pinned vectors)
 
 Reuses the exact `Kuznyechik-CTR-ACPKM-32` bytes from the "Test vectors"
-section above (`internal/gost/cipher_modes_test.go:154`). Both the clean-room
-impl and the in-repo reference must reproduce the pinned ciphertext.
+section above (`TestCTRACPKM_Kuznyechik_Section32` in
+`ctracpkm/ctracpkm_test.go`). The module must reproduce the pinned ciphertext.
 
-```go
-//go:build gost
+The differential parity harness lives in
+`../gostcrypto-compat/parity/ctracpkm/ctracpkm_parity_test.go` and uses the
+internal `gostcrypto-compat/ctr_gost.go` oracle. To run it:
 
-package mypkg_test
-
-import (
-	"bytes"
-	"encoding/hex"
-	"testing"
-
-	ref "go.bigb.es/tlsdialer/internal/gost"   // in-repo reference
-	mynew "github.com/.../yourpkg"                    // clean-room impl under test
-
-	// block ciphers — your clean-room build supplies these; the in-repo
-	// tests use gogost's (ctr_test.go:227).
-	"go.stargrave.org/gogost/v7/gost3412128"
-)
-
-func mustHex(t *testing.T, s string) []byte {
-	t.Helper()
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatalf("bad hex %q: %v", s, err)
-	}
-	return b
-}
-
-func TestCTRACPKMConformance(t *testing.T) {
-	// Kuznyechik-CTR-ACPKM-32 — cipher_modes_test.go:154.
-	key := mustHex(t, "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
-	iv := mustHex(t, "1234567890abcef00000000000000000") // 8B nonce, zero-padded to 16
-	section := 32
-	plain := mustHex(t,
-		"1122334455667700ffeeddccbbaa9988"+
-			"00112233445566778899aabbcceeff0a"+
-			"112233445566778899aabbcceeff0a00"+
-			"2233445566778899aabbcceeff0a0011"+
-			"33445566778899aabbcceeff0a001122"+
-			"445566778899aabbcceeff0a00112233"+
-			"5566778899aabbcceeff0a0011223344")
-	want := mustHex(t,
-		"f195d8bec10ed1dbd57b5fa240bda1b8"+
-			"85eee733f6a13e5df33ce4b33c45dee4"+
-			"4bceeb8f646f4c55001706275e85e800"+
-			"587c4df568d094393e4834afd0805046"+
-			"cf30f57686aeece11cfc6c316b8a896e"+
-			"dffd07ec813636460c4f3b743423163e"+
-			"6409a9c282fac8d469d221e7fbd6de5d")
-
-	newKuz := func(k []byte) cipher.Block { return gost3412128.NewCipher(k) }
-
-	// Reference (in-repo) — must hit the pinned ciphertext.
-	rc, err := ref.NewCTRACPKM(newKuz, key, iv, section)
-	if err != nil {
-		t.Fatalf("ref.NewCTRACPKM: %v", err)
-	}
-	got := make([]byte, len(plain))
-	rc.XORKeyStream(got, plain)
-	if !bytes.Equal(got, want) {
-		t.Fatalf("reference mismatch:\n got  %x\n want %x", got, want)
-	}
-
-	// Clean-room — must also hit the pinned ciphertext, and thus equal ref.
-	mc, err := mynew.NewCTRACPKM(newKuz, key, iv, section)
-	if err != nil {
-		t.Fatalf("mynew.NewCTRACPKM: %v", err)
-	}
-	gotNew := make([]byte, len(plain))
-	mc.XORKeyStream(gotNew, plain)
-	if !bytes.Equal(gotNew, want) {
-		t.Fatalf("clean-room mismatch:\n got  %x\n want %x", gotNew, want)
-	}
-}
+```sh
+( cd ../gostcrypto-compat && go test ./parity/ctracpkm/ -v )
 ```
 
-(Add `"crypto/cipher"` to the import block — elided above for brevity.)
-
-### Differential fuzz harness
-
-Seeds from the KAT, then normalizes each random `[]byte` into the fixed-size
-arguments: 32-byte key, full 16-byte counter (8-byte nonce in the high half,
-low half zero — see "CTR mode" above), a small block-aligned `sectionSize` to
-force boundary crossings, and an arbitrary-length stream. It checks both the
-clean-room/reference **keystream equality** and the **round-trip** invariant.
+A standalone KAT check is simply `TestCTRACPKM_Kuznyechik_Section32`:
 
 ```go
-//go:build gost
-
-package mypkg_test
+package ctracpkm_test
 
 import (
 	"bytes"
 	"crypto/cipher"
 	"testing"
 
-	ref "go.bigb.es/tlsdialer/internal/gost"
-	mynew "github.com/.../yourpkg"
-	"go.stargrave.org/gogost/v7/gost3412128"
+	"github.com/bigbes/gostcrypto/ctracpkm"
+	"github.com/bigbes/gostcrypto/kuznyechik"
 )
 
-func FuzzCTRACPKMConformance(f *testing.F) {
-	f.Add( // KAT inputs as the seed corpus.
-		mustHexF("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
-		mustHexF("1234567890abcef0"),
-		uint16(32),
-		mustHexF("1122334455667700ffeeddccbbaa998800112233445566778899aabbcceeff0a"))
+func TestCTRACPKM_Section32_KAT(t *testing.T) {
+	key, _ := hex.DecodeString("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
+	iv, _ := hex.DecodeString("1234567890abcef00000000000000000")
+	plain, _ := hex.DecodeString(
+		"1122334455667700ffeeddccbbaa9988" +
+			"00112233445566778899aabbcceeff0a" +
+			"112233445566778899aabbcceeff0a00" +
+			"2233445566778899aabbcceeff0a0011" +
+			"33445566778899aabbcceeff0a001122" +
+			"445566778899aabbcceeff0a00112233" +
+			"5566778899aabbcceeff0a0011223344")
+	want, _ := hex.DecodeString(
+		"f195d8bec10ed1dbd57b5fa240bda1b8" +
+			"85eee733f6a13e5df33ce4b33c45dee4" +
+			"4bceeb8f646f4c55001706275e85e800" +
+			"587c4df568d094393e4834afd0805046" +
+			"cf30f57686aeece11cfc6c316b8a896e" +
+			"dffd07ec813636460c4f3b743423163e" +
+			"6409a9c282fac8d469d221e7fbd6de5d")
+
+	newKuz := func(k []byte) cipher.Block { return kuznyechik.NewCipher(k) }
+	got := make([]byte, len(plain))
+	ctracpkm.NewCTRACPKM(newKuz, key, iv, 32).XORKeyStream(got, plain)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("mismatch:\n got  %x\n want %x", got, want)
+	}
+}
+```
+
+### Differential fuzz harness
+
+The module-level differential fuzz harness lives in
+`../gostcrypto-compat/parity/ctracpkm/ctracpkm_parity_test.go`
+(`FuzzDiff_CTRACPKM_vs_Oracle`). It seeds from KATs, randomizes cipher
+choice, key, IV, section size, and plaintext length, and checks both
+keystream equality against the compat oracle and round-trip invariance.
+Run it with:
+
+```sh
+( cd ../gostcrypto-compat && go test -fuzz=FuzzDiff_CTRACPKM_vs_Oracle -fuzztime=30s ./parity/ctracpkm/ )
+```
+
+For standalone package-level round-trip fuzzing (no oracle dependency):
+
+```go
+package ctracpkm_test
+
+import (
+	"crypto/cipher"
+	"testing"
+
+	"github.com/bigbes/gostcrypto/ctracpkm"
+	"github.com/bigbes/gostcrypto/kuznyechik"
+)
+
+func FuzzCTRACPKM_RoundTrip(f *testing.F) {
+	// Seed from KAT inputs.
+	key, _ := hex.DecodeString("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
+	f.Add(key, []byte{0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xce, 0xf0}, uint16(32),
+		[]byte{0x11, 0x22, 0x33, 0x44})
 
 	f.Fuzz(func(t *testing.T, rawKey, rawNonce []byte, rawSection uint16, plain []byte) {
-		// Normalize into this primitive's fixed-size arguments.
 		key := make([]byte, 32)
-		copy(key, rawKey) // truncate/zero-pad to exactly 32 bytes
+		copy(key, rawKey)
 
 		const bs = 16 // Kuznyechik block size
 		iv := make([]byte, bs)
-		copy(iv[:bs/2], rawNonce) // nonce -> high half, low half stays zero
+		copy(iv[:bs/2], rawNonce)
 
-		// sectionSize must be a positive multiple of bs; keep it small to
-		// cross several ACPKM boundaries over short inputs.
 		section := (int(rawSection)%8 + 1) * bs
 
-		newKuz := func(k []byte) cipher.Block { return gost3412128.NewCipher(k) }
+		newKuz := func(k []byte) cipher.Block { return kuznyechik.NewCipher(k) }
 
-		// 1. Clean-room keystream must equal the in-repo reference.
-		rc, err := ref.NewCTRACPKM(newKuz, key, iv, section)
-		if err != nil {
-			t.Skip() // invalid combination rejected identically by both
-		}
-		mc, err := mynew.NewCTRACPKM(newKuz, key, iv, section)
-		if err != nil {
-			t.Fatalf("clean-room rejected what ref accepted: %v", err)
-		}
-		refCT := make([]byte, len(plain))
-		newCT := make([]byte, len(plain))
-		rc.XORKeyStream(refCT, plain)
-		mc.XORKeyStream(newCT, plain)
-		if !bytes.Equal(refCT, newCT) {
-			t.Fatalf("keystream divergence (section=%d, len=%d):\n ref %x\n new %x",
-				section, len(plain), refCT, newCT)
-		}
+		ct := make([]byte, len(plain))
+		ctracpkm.NewCTRACPKM(newKuz, key, iv, section).XORKeyStream(ct, plain)
 
-		// 2. Round-trip: clean-room decrypt of its own ciphertext = plaintext.
-		dec, err := mynew.NewCTRACPKM(newKuz, key, iv, section)
-		if err != nil {
-			t.Fatalf("re-init: %v", err)
-		}
-		back := make([]byte, len(newCT))
-		dec.XORKeyStream(back, newCT)
+		// Round-trip: decrypt of ciphertext must recover plaintext.
+		back := make([]byte, len(ct))
+		ctracpkm.NewCTRACPKM(newKuz, key, iv, section).XORKeyStream(back, ct)
 		if !bytes.Equal(back, plain) {
 			t.Fatalf("round-trip mismatch (section=%d):\n got  %x\n want %x",
 				section, back, plain)
 		}
 	})
 }
-
-func mustHexF(s string) []byte { b, _ := hex.DecodeString(s); return b }
-```
-
-(Add `"encoding/hex"` to the import block for `mustHexF`.)
-
-For a heavier cross-check, diff a randomized clean-room ciphertext against the
-gost-engine CLI oracle. The engine has no Go API for CTR-ACPKM, so shell out
-per CLAUDE.md's "CLI oracles for primitive cross-check" (note: the bare
-`-kuznyechik-ctr` CLI is **plain** CTR — to exercise ACPKM rekeying you must
-drive a section-sized stream or use the engine's ACPKM-enabled mode):
-
-```go
-// engineCTR returns the gost-engine plain-Kuznyechik-CTR ciphertext for a
-// 32-byte hex key and 8-byte hex iv. No gogost/OpenSSL Go binding exists for
-// this mode; CLAUDE.md mandates the CLI oracle. Use only as a *plain*-CTR
-// cross-check (no ACPKM) or against an ACPKM-driving engine invocation.
-func engineCTR(t *testing.T, keyHex, ivHex string, plain []byte) []byte {
-	t.Helper()
-	in := filepath.Join(t.TempDir(), "plain.bin")
-	if err := os.WriteFile(in, plain, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(
-		"/opt/homebrew/opt/openssl@3/bin/openssl", "enc", "-engine", "gost",
-		"-kuznyechik-ctr", "-K", keyHex, "-iv", ivHex, "-in", in)
-	cmd.Env = append(os.Environ(),
-		"OPENSSL_CONF=/opt/homebrew/etc/gost/gost-engine.cnf")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("gost-engine oracle: %v", err)
-	}
-	return out
-}
 ```
 
 ### Run
 
 ```sh
-go test -tags gost -run TestCTRACPKMConformance ./yourpkg/
-go test -tags gost -fuzz=FuzzCTRACPKMConformance -fuzztime=30s ./yourpkg/
+go test -run TestCTRACPKM ./ctracpkm/
+go test -fuzz=FuzzCTRACPKM_RoundTrip -fuzztime=30s ./ctracpkm/
+( cd ../gostcrypto-compat && go test ./parity/ctracpkm/ )
 ```
 
 ## References
@@ -594,32 +514,27 @@ go test -tags gost -fuzz=FuzzCTRACPKMConformance -fuzztime=30s ./yourpkg/
 
 ### Source `file:line` citations
 
-Repo (in-repo reimplementation — the de-facto spec):
-- `internal/gost/ctr_gost.go:32-37` — `acpkmD` constant.
-- `internal/gost/ctr_gost.go:57-70` — `NewCTR`.
-- `internal/gost/ctr_gost.go:86-117` — `NewCTRACPKM` (section validation).
-- `internal/gost/ctr_gost.go:122-129` — `rekeyACPKM` (ACPKM transform).
-- `internal/gost/ctr_gost.go:134-163` — `XORKeyStream` (rekey scheduling).
-- `internal/gost/ctr_gost.go:167-174` — `incCounter` (big-endian carry).
-- `tls/internal/record/protection_ctromac_gost.go:99,135` — section sizes.
-- `tls/internal/record/protection_ctromac_gost.go:154-172` — `adjustIV`.
-- `tls/internal/record/protection_ctromac_gost.go:205,250` — call sites.
-- Tests: `internal/gost/ctr_test.go`, `internal/gost/cipher_modes_test.go:154,176`,
-  `internal/gost/magma_acpkm_test.go:39`.
+This module (clean-room implementation):
+- `ctracpkm/ctracpkm.go` — `acpkmD`, `NewCTR`, `NewCTRACPKM`, `rekeyACPKM`,
+  `XORKeyStream`, `incCounter`.
+- `ctracpkm/ctracpkm_test.go` — KATs and round-trip tests.
+- `ctracpkm/guard_test.go` — construction panic guards.
+- `ctracpkm/rfc/R1323565.1.017-2018.pdf` — Appendix A.1 (Magma CTR-ACPKM
+  end-to-end vector) and A.4.2 (ACPKM-Master vector).
+- Parity: `../gostcrypto-compat/parity/ctracpkm/ctracpkm_parity_test.go`.
 
-gost-engine v3.0.3 (parity target):
+gost-engine v3.0.3 (test-vector source):
 - `tmp/engine/gost89.c:247-252` — `ACPKM_D_const` (Magma D).
 - `tmp/engine/gost89.c:768-777` — `acpkm_magma_key_meshing`.
 - `tmp/engine/gost_grasshopper_cipher.c:155-160` — `ACPKM_D_2018` (Kuznyechik D).
 - `tmp/engine/gost_grasshopper_cipher.c:162-178` — `acpkm_next`.
 - `tmp/engine/gost_grasshopper_cipher.c:581-600` — `inc_counter`/`ctr128_inc`.
-- `tmp/engine/gost_grasshopper_cipher.c:660-720` — `apply_acpkm_grasshopper`,
-  `gost_grasshopper_cipher_do_ctracpkm`.
+- `tmp/engine/gost_grasshopper_cipher.c:660-720` — `apply_acpkm_grasshopper`.
 - `tmp/engine/gost_grasshopper_cipher.c:334` — Kuznyechik section_size = 4096.
 - `tmp/engine/gost_crypt.c:807-810` — `ctr64_inc`.
-- `tmp/engine/gost_crypt.c:814-869` — `apply_acpkm_magma`, `magma_cipher_do_ctr`.
+- `tmp/engine/gost_crypt.c:814-869` — `apply_acpkm_magma`.
 - `tmp/engine/gost_crypt.c:517` — Magma key_meshing (section) = 1024.
 - `tmp/engine/test_ciphers.c`, `tmp/engine/test_gost89.c:60` — KAT sources.
 
 gogost (NOT used for this primitive):
-- `third_party/gogost/gost3413/` — contains only `padding.go`; no CTR/ACPKM.
+- gogost's `gost3413/` contains only `padding.go`; no CTR/ACPKM.

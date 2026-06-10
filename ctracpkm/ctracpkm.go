@@ -22,6 +22,8 @@ import (
 	"crypto/cipher"
 	"errors"
 	"slices"
+
+	"github.com/bigbes/gostcrypto/internal/alias"
 )
 
 // acpkmD is the public ACPKM constant D (RFC 8645 §6.2.1). D is the 1024-bit
@@ -94,6 +96,10 @@ func NewCTR(b cipher.Block, iv []byte) cipher.Stream {
 // sectionSize disables ACPKM and degrades to plain CTR (NewCTRACPKM(...,0) ≡
 // NewCTR). Guide §"ACPKM re-keying schedule".
 func NewCTRACPKM(newBlock func(key []byte) cipher.Block, key, iv []byte, sectionSize int) cipher.Stream {
+	if newBlock == nil {
+		panic("ctracpkm: newBlock must not be nil")
+	}
+
 	if sectionSize < 0 {
 		panic("ctracpkm: negative section size")
 	}
@@ -106,6 +112,14 @@ func NewCTRACPKM(newBlock func(key []byte) cipher.Block, key, iv []byte, section
 
 	b := newBlock(key)
 	bs := b.BlockSize()
+
+	// The ACPKM rekey iterates in steps of bs over the 32-byte D constant.
+	// A block size that does not divide 32 would cause a slice-bounds panic
+	// inside rekeyACPKM after a full section has already been emitted. Fail
+	// early and descriptively instead.
+	if acpkmKeySize%bs != 0 {
+		panic("ctracpkm: block size must divide the 32-byte ACPKM key")
+	}
 
 	if len(iv) != bs {
 		panic("ctracpkm: IV length must equal block size")
@@ -139,6 +153,9 @@ var errShortDst = errors.New("ctracpkm: output smaller than input")
 func (c *CTR) XORKeyStream(dst, src []byte) {
 	if len(dst) < len(src) {
 		panic(errShortDst)
+	}
+	if alias.InexactOverlap(dst[:len(src)], src) {
+		panic("ctracpkm: invalid buffer overlap")
 	}
 
 	for i := range src {
