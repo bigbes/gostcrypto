@@ -43,13 +43,13 @@ const (
 	max256BitLen = 256
 )
 
-// errUKMSourceLen is returned when ukm_source is not exactly 32 bytes.
-var errUKMSourceLen = errors.New("keg: ukm_source must be exactly 32 bytes")
+// ErrUKMSourceLen is returned when ukm_source is not exactly 32 bytes.
+var ErrUKMSourceLen = errors.New("keg: ukm_source must be exactly 32 bytes")
 
-// errCurve512 is returned when a 512-bit curve is supplied: KEG2012_256
+// ErrCurve512 is returned when a 512-bit curve is supplied: KEG2012_256
 // implements only the 256-bit case (NID_id_GostR3410_2012_256). The 512-bit
 // KEG is a distinct algorithm (keg.md §Specification) not handled here.
-var errCurve512 = errors.New("keg: KEG2012_256 supports only 256-bit curves; 512-bit curve rejected")
+var ErrCurve512 = errors.New("keg: KEG2012_256 supports only 256-bit curves; 512-bit curve rejected")
 
 // kdfLabel is the fixed 8-byte ASCII label "kdf tree" (no NUL terminator); a
 // separate 0x00 separator follows it inside KDFTree. keg.md §"Step 3".
@@ -74,7 +74,7 @@ func curveTC26256A() *gost3410curves.Curve {
 // including the CryptoPro paramsets signalled as GC256B/C/D (RFC 9189
 // §A.1.3 / keg/rfc/rfc9189.txt). A nil curve defaults to TC26 256-bit
 // ParamSet A (OID 1.2.643.7.1.2.1.1.1), the curve the algorithm is specified
-// against. A 512-bit curve is rejected (errCurve512): the 512-bit KEG is a
+// against. A 512-bit curve is rejected (ErrCurve512): the 512-bit KEG is a
 // different algorithm not implemented here.
 //
 // Inputs:
@@ -90,13 +90,13 @@ func KEG2012_256(curve *gost3410curves.Curve, serverPub, clientPriv, ukmSource [
 	var out [64]byte
 
 	if len(ukmSource) != ukmSourceLen {
-		return out, errUKMSourceLen
+		return out, ErrUKMSourceLen
 	}
 
 	if curve == nil {
 		curve = curveTC26256A()
 	} else if curve.P.BitLen() > max256BitLen {
-		return out, errCurve512
+		return out, ErrCurve512
 	}
 
 	// Step 1 — UKM adjustment (keg.md §"Step 1").
