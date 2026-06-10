@@ -19,32 +19,26 @@ decryption are the same operation.
   IMIT (documented separately); the record-layer Seal is
   `CNT.encrypt(plaintext || IMIT)`.
 
-## Where this repo uses it
+## Where this module uses it
 
-- **Cipher spec:** `tls/internal/suites/gost_suites.go:37`
-  (`specGOST28147CNT`, `Name: "GOST28147-CNT"`).
-- **TLS suites that select it** (`tls/internal/suites/gost_suites.go`):
+This package (`github.com/bigbes/gostcrypto/gost28147cnt`) is a standalone
+clean-room module — it does **not** import gogost or any GPL code.
+
+- **Facade entry point:** `modes.go` in the root `gostcrypto` package exposes
+  `NewGOST28147_CNT(key, iv []byte) (cipher.Stream, error)` which constructs
+  a CNT instance using `gost28147.SboxCryptoProA`.
+- **TLS suites** (in the sibling `github.com/bigbes/gostls` module):
   - `0x0081` GOST2001-GOST89-GOST89 — CryptoPro-A S-box
-    (`gost_suites.go:168`).
   - `0xFF85` GOST2012-GOST8912-GOST8912 — tc26-Z S-box
-    (`gost_suites.go:190`).
-  - `0xC102` IANA alias of `0xFF85` (`gost_suites.go:213`).
-- **Record-layer protector:** `tls/internal/record/protection_gost.go` —
-  `gost28147Protector` (`:309`), built by `NewGOST28147Protector` (`:316`).
-  The keystream generator is the in-repo type `gostCNT` (`:47`).
-- **Streaming reimplementation:** `tls/internal/record/protection_gost.go:47-130`
-  (`gostCNT`). **This is NOT backed by gogost.** It calls only gogost's
-  block-cipher `Encrypt`/`Decrypt` (through the `internal/gost` wrapper);
-  the counter/gamma logic is reimplemented in-repo because gogost's
-  `gost28147.CTR` cannot stream across record boundaries (see deltas below).
-- **One-shot wrapper (gogost-backed, used by tests / non-record callers):**
-  `internal/gost/primitives_gost.go:383` (`NewGOST28147_CNT`) returns
-  gogost's `*gost28147.CTR` directly.
+  - `0xC102` IANA alias of `0xFF85`
+- **Record-layer streaming:** `gostls` constructs one `*CNT` per TLS
+  connection and calls `XORKeyStream` on successive records — the whole point
+  of this package is that partial-block gamma is carried correctly across calls,
+  which `gogost`'s `gost28147.CTR` cannot do (see deltas below).
 
-`statusKind` for this primitive is **in-repo-reimpl**: the TLS record path
-uses `gostCNT`, a from-scratch counter implementation. gogost is used only
-for the underlying single-block ECB transform and for the one-shot test
-wrapper.
+`statusKind` for this primitive is **clean-room**: the counter/gamma logic is
+implemented from scratch in `cnt.go` without consulting gogost source. The only
+dependency is the sibling `gost28147` block-cipher package.
 
 ## Specification
 
@@ -329,21 +323,33 @@ CNT is a stream mode: output length equals input length, no block padding
 
 ## Test vectors
 
-### Existing tests in this repo
+### Existing tests in this package
 
-- `internal/gost/ctr_test.go` — **note:** this file tests GOST R 34.13-2015
-  *CTR* for Kuznyechik/Magma (`NewCTR`), **not** the 28147 CNT mode. It is
-  the wrong primitive for CNT parity, but is the closest counter-mode test
-  and useful for cross-checking counter carry semantics
-  (`TestCTR_CounterIncrement`, `ctr_test.go:121`).
-- End-to-end CNT correctness is validated by the live Tarantool-EE
-  integration path: `TestTarantoolEE_Ping_GOST_Pure` exercises `0x0081`
-  (CryptoPro-A S-box) and `0xFF85` (tc26-Z S-box) — the full CNT+IMIT
-  record stream against gost-engine, referenced from
-  `internal/gost/primitives_gost.go:381-382` and the suites comments.
-- gogost's own `third_party/gogost/gost28147/ctr_test.go` is the de-facto
-  KAT for the one-shot `CTR` type (single call only; do not use as a
-  streaming reference — see D4).
+Tests live in `gost28147cnt/cnt_test.go`, `gost28147cnt/guard_test.go`,
+`gost28147cnt/engine_vector_test.go`, and `gost28147cnt/fuzz_test.go`.
+
+- **`TestKAT_FirstBlocks`** — pins the first 32-byte keystream for zero
+  key/IV under both S-boxes (engine-CLI cross-checked).
+- **`TestKAT_KeyMeshing`** — pins bytes [1016:1040] straddling the
+  1024-byte CryptoPro meshing boundary for both S-boxes.
+- **`TestKAT_EngineEncTry`** — pins the gost-engine `enc.try` etalon
+  (CryptoPro-A, 21-byte plaintext, real key/IV).
+- **`TestCNT_Engine4K_CarryAndMeshing`** — loads a 4096-byte keystream
+  from `testdata/engine-cnt-cryptoproa-4096.hex` (CryptoPro-A, real key/IV,
+  gost-engine 3.0.3). 512 blocks force ≥1 end-around carry and cross the
+  meshing boundary 3 times. Both one-shot and split-write variants are checked.
+- **`TestInvolution`** — encrypt-then-decrypt round-trip for 12 lengths and
+  both S-boxes, including mesh-crossing lengths.
+- **`TestStreamingEqualsOneShot`** — split-call streaming invariant for
+  tc26-Z over 1100 bytes at six split schedules.
+- **`TestNewCNT_PanicsOnBadIVLength`** / **`TestXORKeyStream_PanicsOnShortDst`**
+  — guard tests for the promised panic contracts.
+- **`FuzzSplitInvariance`** — oracle-free: chunked XORKeyStream output must
+  equal one-shot output for arbitrary key/IV/split. Seed corpus reaches 2 KiB
+  to exercise meshing.
+
+Parity tests (differential against the gogost oracle and gost-engine CLI) live
+in `../gostcrypto-compat/parity/gost28147cnt/` (GPL quarantine).
 
 ### Inline KAT a reimplementer can run immediately
 
@@ -477,187 +483,52 @@ Each step is independently testable against a vector before moving on.
    records (no per-record reset of `iv`/`count`/`num`) (D7). *Verify:* a
    two-record round-trip against the engine / live Tarantool-EE.
 6. **Record-layer wiring.** Seal = `CNT.encrypt(plaintext || IMIT4)`; Open =
-   `CNT.decrypt(fragment)` then split tail-4 MAC and constant-time compare
-   (`protection_gost.go:356-378`). S-box chosen by suite (CryptoPro-A for
-   `0x0081`, tc26-Z for `0xFF85`). *Verify:* `TestTarantoolEE_Ping_GOST_Pure`
-   for both suites.
+   `CNT.decrypt(fragment)` then split tail-4 MAC and constant-time compare.
+   S-box chosen by suite (CryptoPro-A for `0x0081`, tc26-Z for `0xFF85`).
+   *Verify:* the `gostls` module's `TestTarantoolEE_Ping_GOST_Pure` for both
+   suites (lives in the sibling `github.com/bigbes/gostls` module).
 
 ## Conformance & fuzz testing
 
-This scaffolding proves a clean-room CNT against the parity-validated
-in-repo path, not against gogost's raw `CTR`. **Differential strategy:**
-diff your impl against (a) the pinned first-gamma-block keystream vectors
-above (the ground-truth bytes, cross-checked against the gost-engine CLI),
-and (b) the repo's `internal/gost.NewGOST28147_CNT`
-(`primitives_gost.go:383`) used in **one-shot** form only — a fresh
-instance per `XORKeyStream` call — **but only for the pinned
-zero-key/zero-IV vector below 1024 bytes**. Do **not** diff against raw
-gogost `gost28147.CTR` driven incrementally: it over-increments the counter
-on block-aligned input and discards partial-block gamma across calls (D4 /
-`CLAUDE.md` "gogost/v7 library gotchas"), so a streaming differential
-against it produces false mismatches. `NewGOST28147_CNT` returns that same
-`*gost28147.CTR`, which is why the reference call must be one-shot.
+The clean-room implementation is tested at three levels:
 
-**The gogost oracle is NOT a general single-shot reference.** Even called
-once, gogost's `CTR` diverges from the gost-engine ground truth at the first
-counter-half wrap — which, for a random key or IV, occurs *well below* the
-1024-byte meshing boundary (empirically: random key + zero IV diverges as
-early as offset 160; zero key + random IV at offset 368). The cause is the
-end-around-carry mismatch in D4 (gogost reduces the whole counter half on
-`n2 >= 2^32-1`; the engine applies `if old > h: h++` per the D1 byte
-mapping). The clean-room impl matches the engine in exactly the cases where
-the gogost oracle does not. Therefore the **random** key/IV differential
-must target the **gost-engine CLI** (CLAUDE.md "CLI oracles"), not the
-gogost oracle; the gogost oracle is sound only for the pinned
-zero-key/zero-IV vector. Note `NewGOST28147_CNT` hard-wires the
-**CryptoPro-A** S-box (`SboxDefault`, `primitives_gost.go:390`), so the
-importable reference covers the `0x0081` S-box; the **tc26-Z** vectors
-(`0xFF85` / `0xC102`) are pinned-only and also reproducible from the
-`-gost89-cnt-12` CLI oracle.
+1. **In-package KATs** (`cnt_test.go`, `engine_vector_test.go`): pinned
+   keystream bytes from gost-engine 3.0.3 for both S-boxes, covering the
+   first-block, mesh-boundary, and 4096-byte (carry+3 mesh) cases.
 
-The conformance test reuses the exact pinned hex from the KAT section above
-(zero key, zero IV, 32-byte zero plaintext → keystream). `mynew` is the
-placeholder import alias for the clean-room package under test; it is
-assumed to expose `mynew.NewCNT(key, iv []byte, cryptoPro bool) Stream`
-with a `XORKeyStream(dst, src []byte)` method (rename to match your real
-API).
+2. **In-package fuzz** (`fuzz_test.go`): `FuzzSplitInvariance` — oracle-free,
+   runs in the BSD module. Any split of the input through a single `CNT`
+   instance must produce the same bytes as a one-shot call. Input lengths up to
+   4 KiB ensure the fuzzer crosses the meshing boundary.
 
-```go
-//go:build gost
+3. **Cross-module parity tests** (`../gostcrypto-compat/parity/gost28147cnt/`):
+   - `TestDiff_InternalGostOracle` — differential against gogost's `CTR`
+     oracle, restricted to zero key/IV, n < 1024 (the oracle's valid regime).
+   - `TestDiff_GostEngineCLI` — random key/IV differential against the
+     gost-engine CLI, both S-boxes, including non-block-aligned splits.
+   - `FuzzDiff_InternalGostOracle` — fuzzes the oracle-valid regime.
+   - `TestDiff_OracleLacksMeshing` — locks in that the clean-room impl and
+     the oracle agree pre-mesh and diverge post-mesh.
 
-package mynew_test
+**Why the gogost oracle is not a general reference:** gogost's `CTR` diverges
+from the gost-engine at the first counter-half wrap (empirically: as early as
+offset 160 for a random key). The cause is the end-around-carry mismatch (D4):
+gogost reduces the whole counter half on `n2 >= 2^32-1`; the engine applies
+`if old > h: h++`. The clean-room impl matches the engine; the gogost oracle
+is only valid for the pinned zero-key/zero-IV vector below 1024 bytes.
 
-import (
-	"bytes"
-	"encoding/hex"
-	"testing"
-
-	"go.bigb.es/tlsdialer/internal/gost" // NewGOST28147_CNT (CryptoPro-A)
-	mynew "example.com/yourpkg"           // clean-room impl under test
-)
-
-// pinned from gost28147-cnt.md "Inline KAT": zero key, zero
-// IV, all-zero plaintext, so output == raw gamma keystream.
-var cntKATs = []struct {
-	name      string
-	cryptoPro bool // true → CryptoPro-A (0x0081); false → tc26-Z (0xFF85)
-	want      string
-}{
-	{"tc26-Z", false, "8671cdbf3c1aae3f637fa5cfaa0cb42fa5a47a133d73b9f2c0b04f8ca25552f8"},
-	{"CryptoPro-A", true, "7f775ae1edb7082b95a46f38e46d4026d74593cd0a8874dc202d705df54f7899"},
-}
-
-func TestCNTConformance(t *testing.T) {
-	key := make([]byte, 32) // 32 zero bytes
-	iv := make([]byte, 8)   // 8-byte zero synchro
-	for _, tc := range cntKATs {
-		t.Run(tc.name, func(t *testing.T) {
-			want, _ := hex.DecodeString(tc.want)
-			in := make([]byte, len(want)) // all-zero plaintext
-
-			// clean-room impl
-			got := make([]byte, len(in))
-			mynew.NewCNT(key, iv, tc.cryptoPro).XORKeyStream(got, in)
-			if !bytes.Equal(got, want) {
-				t.Fatalf("%s: clean-room got %x, want pinned %x", tc.name, got, want)
-			}
-
-			// reference: in-repo gogost-backed one-shot (CryptoPro-A only).
-			if tc.cryptoPro {
-				ref, err := gost.NewGOST28147_CNT(key, iv)
-				if err != nil {
-					t.Fatal(err)
-				}
-				refOut := make([]byte, len(in))
-				ref.XORKeyStream(refOut, in) // ONE call: gogost CTR is single-shot only (D4)
-				if !bytes.Equal(refOut, want) {
-					t.Fatalf("%s: in-repo ref got %x, want pinned %x", tc.name, refOut, want)
-				}
-			}
-		})
-	}
-}
-```
-
-The fuzz harness below seeds from the KAT inputs, normalizes the random byte
-slice into a fixed 32-byte key + 8-byte IV + variable plaintext, and compares
-the clean-room impl to the one-shot `NewGOST28147_CNT` reference.
-
-**Caveat — this harness only holds for the zero-key/zero-IV seed.** As
-explained above, gogost's one-shot `CTR` diverges from ground truth at the
-first counter-half wrap, which for a *random* key/IV happens well below 1024
-bytes — so feeding genuinely random key/IV into the harness below will flag a
-*correct* clean-room impl as wrong (false mismatch). Keep it as a smoke test
-pinned to the zero/zero seed, or replace the reference with the gost-engine
-CLI (see `engineCNT` in the random differential below) to fuzz arbitrary
-key/IV. It targets CryptoPro-A so the importable `NewGOST28147_CNT` reference
-applies; tc26-Z is covered by the pinned KAT above and the
-`-gost89-cnt-12` CLI oracle.
-
-```go
-//go:build gost
-
-package mynew_test
-
-import (
-	"bytes"
-	"testing"
-
-	"go.bigb.es/tlsdialer/internal/gost"
-	mynew "example.com/yourpkg"
-)
-
-func FuzzCNTConformance(f *testing.F) {
-	f.Add([]byte{})                      // empty plaintext
-	f.Add(make([]byte, 32))              // 32-byte zero plaintext (KAT length)
-	f.Add([]byte("abc"))                 // non-block-aligned
-	f.Add(make([]byte, 1040))            // crosses the 1024-byte meshing boundary (D6)
-
-	f.Fuzz(func(t *testing.T, data []byte) {
-		// Normalize random bytes into fixed-size CNT arguments.
-		key := make([]byte, 32)
-		iv := make([]byte, 8)
-		copy(key, data) // first ≤32 bytes seed the key
-		if len(data) > 32 {
-			copy(iv, data[32:]) // next ≤8 bytes seed the IV
-		}
-		pt := data // arbitrary-length plaintext
-
-		// clean-room impl, single shot (CryptoPro-A == SboxDefault).
-		got := make([]byte, len(pt))
-		mynew.NewCNT(key, iv, true).XORKeyStream(got, pt)
-
-		// reference: gogost-backed one-shot. ONE XORKeyStream call only —
-		// streaming reuse over-increments (D4).
-		ref, err := gost.NewGOST28147_CNT(key, iv)
-		if err != nil {
-			t.Fatalf("ref ctor: %v", err)
-		}
-		want := make([]byte, len(pt))
-		ref.XORKeyStream(want, pt)
-
-		if !bytes.Equal(got, want) {
-			t.Fatalf("CNT mismatch: key=%x iv=%x len=%d\n got=%x\nwant=%x",
-				key, iv, len(pt), got, want)
-		}
-	})
-}
-```
-
-Run:
+Run the in-package tests and fuzz:
 
 ```sh
-go test -tags gost -run TestCNTConformance ./yourpkg/
-go test -tags gost -fuzz=FuzzCNTConformance -fuzztime=30s ./yourpkg/
+CGO_ENABLED=0 go test ./gost28147cnt/
+go test -fuzz=FuzzSplitInvariance -fuzztime=30s ./gost28147cnt/
 ```
 
-The tc26-Z keystream (`0xFF85` / `0xC102`) has no importable gogost API on a
-chosen S-box from this wrapper, so its differential reference is the
-pinned KAT plus the gost-engine `-gost89-cnt-12` CLI oracle (commands in the
-"Inline KAT" section). To fuzz tc26-Z too, shell out to that oracle from a
-helper instead of importing — write the plaintext to a temp file and run
-`openssl enc -engine gost -gost89-cnt-12 -K <hex> -iv <hex> -nopad`,
-comparing its stdout to your impl, exactly as the CLI block above does.
+Run the cross-module parity tests (requires `../gostcrypto-compat`):
+
+```sh
+( cd ../gostcrypto-compat && go test ./parity/gost28147cnt/ )
+```
 
 ## References
 
@@ -675,21 +546,14 @@ comparing its stdout to your impl, exactly as the CLI block above does.
 
 Key source citations:
 
-- gogost reference (GPL-3, do not copy): `third_party/gogost/gost28147/ctr.go:33-56`
-  (`CTR.XORKeyStream`, with the streaming bugs), `:24-31`
-  (`NewCTR` seeding); `cipher.go:40-52` (`SeqEncrypt`), `:84-107`
-  (LE conversions + `xcrypt`); `sbox.go:72-81` (tc26-Z, gogost row order),
-  `:117-126` (substitution).
+- Clean-room implementation: `gost28147cnt/cnt.go` (this package).
+- Block cipher dependency: `gost28147/gost28147.go` (`Encrypt`/`Decrypt`/`SBox()`).
 - gost-engine ground truth: `tmp/engine/gost_crypt.c:671-703`
-  (`gost_cnt_next` — the parity target), `gost89.c:214-238`
+  (`gost_cnt_next` — the parity target), `tmp/engine/gost89.c:214-238`
   (tc26-Z, engine row order), `:240-245` (`CryptoProKeyMeshingKey`),
   `:750-766` (`cryptopro_key_meshing`).
-- in-repo reimplementation: `tls/internal/record/protection_gost.go:47-130`
-  (`gostCNT`), `:309-378` (`gost28147Protector` / Seal / Open),
-  `:142-147` (meshing constant), `:138` (`meshThreshold = 1024`).
-- gogost-backed one-shot wrapper: `internal/gost/primitives_gost.go:383-392`
-  (`NewGOST28147_CNT`).
-- suites: `tls/internal/suites/gost_suites.go:37` (`specGOST28147CNT`),
-  `:168,190,213` (suites `0x0081`, `0xFF85`, `0xC102`).
-- divergence log: `TODO.md` (S-box row-order analysis; CryptoPro key
-  meshing resolution).
+- gogost reference (GPL-3, do not copy; informational only):
+  `gost28147/ctr.go:33-56` (`CTR.XORKeyStream`, with the streaming bugs),
+  `:24-31` (`NewCTR` seeding).
+- Cross-module parity tests: `../gostcrypto-compat/parity/gost28147cnt/`.
+- Divergence log: `gost28147cnt/TODO.md`; root `TODO.md`.
