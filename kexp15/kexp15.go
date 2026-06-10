@@ -1,6 +1,6 @@
 // Package kexp15 implements the GOST KExp15 key-export envelope
-// (R 1323565.1.017-2018), as specified by RFC 9189 §8.2.1 and reused by
-// RFC 9367. The construction is OMAC-then-CTR:
+// (R 1323565.1.017-2018), as specified by RFC 9189 §8.2.1. The construction
+// is OMAC-then-CTR:
 //
 //	CEK_MAC = OMAC(K_Exp_MAC, IV || S)      (truncated to mac_len)
 //	SExp    = CTR-Encrypt(K_Exp_ENC, IV_full, S || CEK_MAC)
@@ -30,10 +30,12 @@ type KexpVariant int
 
 const (
 	// KexpKuznyechik is the 128-bit-block variant: iv_len=8, mac_len=16,
-	// block=16. Used by RFC 9367 suite 0xC100.
+	// block=16. Used by RFC 9189 suite 0xC100
+	// (TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC).
 	KexpKuznyechik KexpVariant = iota
 	// KexpMagma is the 64-bit-block variant: iv_len=4, mac_len=8, block=8.
-	// Used by RFC 9367 suite 0xC101.
+	// Used by RFC 9189 suite 0xC101
+	// (TLS_GOSTR341112_256_WITH_MAGMA_CTR_OMAC).
 	KexpMagma
 )
 
