@@ -7,14 +7,17 @@ GOST standard.
 
 *Intended implementer: a Sonnet-class coding agent — every constant, S-box, parameter table, and edge case is inlined so this primitive can be built without consulting gogost or external specs.*
 
-**Status: in-repo reimplementation.** This primitive is **not** sourced from
-gogost. The repo provides its own OMAC/CMAC in `internal/gost/omac.go`
-(`NewOMAC`, `OMAC.Write`, `OMAC.Sum`), layered over any `crypto/cipher.Block`
-(the block cipher itself — Kuznyechik `gost3412128`, Magma `gost341264` — still
-comes from gogost, but that is a *separate* primitive with its own guide:
-`../kuznyechik/kuznyechik-gost34122015.md`). The de-facto spec this file
-documents is the behavioral contract in `internal/gost/omac.go`, cross-checked
-against gost-engine v3.0.3 (Tarantool's upstream) and RFC 4493.
+**Status: clean-room implementation in this module.** This primitive is **not**
+sourced from gogost. The code lives at `omac/omac.go` in the `gostcrypto`
+module (`New`, `OMAC.Write`, `OMAC.Sum`), layered over any
+`crypto/cipher.Block`. The block ciphers (Kuznyechik `kuznyechik.NewCipher`,
+Magma `magma.NewCipher`) are also clean-room implementations in this module —
+see `../kuznyechik/kuznyechik-gost34122015.md` and `../magma/magma.md`. The
+de-facto spec this file documents is the behavioral contract in `omac/omac.go`,
+cross-checked against gost-engine v3.0.3 (Tarantool's upstream) and RFC 4493.
+Parity / differential fuzz tests live in
+`../gostcrypto-compat/parity/omac/` (GPL-licensed; never imported by this
+module).
 
 ## What it is
 
@@ -42,14 +45,14 @@ truncation `memcpy(md, mac, c->dgst_size)` at `tmp/engine/gost_omac.c:95`.
 
 ### Where this repo uses it
 
-- **TLS record protection for RFC 9367 GOST suites** — Kuznyechik-CTR-OMAC
-  (`0xC100`) and Magma-CTR-OMAC (`0xC101`). The protector
-  `ctrOMACProtector` calls `gost.NewOMAC(macBlock, p.tagSize)` once per record
-  in both `Seal` (`tls/internal/record/protection_ctromac_gost.go:192`) and
-  `Open` (`:262`). Here `tagSize` is the **full** block width:
-  `16` for Kuznyechik (`:95`) and `8` for Magma (`:131`). See the sibling guide
+- **TLS record protection for RFC 9189 GOST suites** — Kuznyechik-CTR-OMAC
+  (`0xC100`) and Magma-CTR-OMAC (`0xC101`). The protector `ctrOMACProtector`
+  calls `omac.New(macBlock, tagSize)` once per record in both `Seal` and
+  `Open`. Here `tagSize` is the **full** block width: `16` for Kuznyechik and
+  `8` for Magma. This call site lives in the `gostls` module (sibling of
+  `gostcrypto`), not in this module. See the sibling guide
   `../ctracpkm/ctr-acpkm.md` for the CTR half of these suites.
-- **kexp15 key-export wrapper** — `internal/gost/kexp15_gost.go:105` computes
+- **kexp15 key-export wrapper** — `kexp15/kexp15.go` computes
   `mac = OMAC(mac_key, iv || shared_key)` truncated to `macLen`, then
   CTR-encrypts `shared_key || mac`. See `../kexp15/kexp15.md`.
 
@@ -128,36 +131,36 @@ Each delta cites BOTH the RFC/standard and the source line. These are the
 points where a naive reading diverges from the parity target.
 
 1. **`Rb` is chosen by block size, with a hard panic on anything else.**
-   `cmacSubkeys` (`internal/gost/omac.go:62-82`) selects `rb = 0x87` for
-   `bs == 16` and `rb = 0x1b` for `bs == 8`, and `panic`s otherwise
-   (`omac.go:75-76`). The 64-bit constant `0x1b` is the spot most
-   reimplementers get wrong — RFC 4493 only states `0x87`; the 64-bit value
-   comes from RFC 8645 §6.3.6 (OMAC-ACPKM-Master, `R_64 = 0^59|11011 =
-   0x1b`). Engine equivalent: OpenSSL's `CMAC_Init`
+   `rbForBlockSize` (`omac/omac.go:92-101`) selects `rb = 0x87` for
+   `bs == 16` and `rb = 0x1b` for `bs == 8`, and `panic`s otherwise.
+   `cmacSubkeys` (`omac/omac.go:108-117`) calls it. The 64-bit constant `0x1b`
+   is the spot most reimplementers get wrong — RFC 4493 only states `0x87`; the
+   64-bit value comes from RFC 8645 §6.3.6 (OMAC-ACPKM-Master,
+   `R_64 = 0^59|11011 = 0x1b`). Engine equivalent: OpenSSL's `CMAC_Init`
    derives both subkeys internally per the cipher's block size
    (`tmp/engine/gost_omac.c:149`, `CMAC_Init(... cipher ...)`).
 
 2. **The shift is big-endian over the whole block.** `shiftLeftXorRb`
-   (`omac.go:86-97`): `msb = in[0] >> 7` reads the leading bit of byte 0;
-   `out[i] = (in[i] << 1) | (in[i+1] >> 7)` shifts left carrying the next
+   (`omac/omac.go:127-142`): `msb = in[0] >> 7` reads the leading bit of byte
+   0; `out[i] = (in[i] << 1) | (in[i+1] >> 7)` shifts left carrying the next
    byte's top bit down; the final byte is `in[last] << 1`, then
-   `out[last] ^= rb` iff `msb == 1` (`omac.go:88-95`). `Rb` lands in the
-   **last** byte. RFC 4493 §2.3 defines exactly this "one-bit left shift of
-   the entire 128-bit string". A little-endian shift (carry flowing the other
-   way, `Rb` in byte 0) is the classic bug.
+   `out[last] ^= rb` iff `msb == 1`. `Rb` lands in the **last** byte. RFC 4493
+   §2.3 defines exactly this "one-bit left shift of the entire 128-bit string".
+   A little-endian shift (carry flowing the other way, `Rb` in byte 0) is the
+   classic bug.
 
 3. **Last-block selection keys on `len(buf) == blockSize`, and a buffered full
    block is a legal, intentional state.** `Write` deliberately does **not**
    flush a full block if it is the trailing data — it holds up to `blockSize`
    bytes in `buf` so `Sum` can tell "exactly `n` unprocessed bytes" (the `K1`
    path) from "fewer than `n`" (the `K2`/padding path)
-   (`omac.go:99-129`, esp. the `len(o.buf) == o.blockSize && len(p) > 0`
-   guard at `omac.go:122`). In `Sum`: if `len(bufSnap) == blockSize`,
-   `finalBlock = bufSnap XOR K1` (`omac.go:150-152`); else pad with `0x80`
-   then zeros and XOR `K2` (`omac.go:154-159`). This matches RFC 4493 §2.4
-   step 4's "if M_n is complete … else …". An off-by-one (flushing the full
-   final block early, then padding an empty block with `K2`) yields a wrong
-   tag on every block-aligned message.
+   (`omac/omac.go:151-173`, esp. the `len(o.buf) == o.blockSize && len(p) > 0`
+   guard at `omac/omac.go:165`). In `Sum`: if `len(o.buf) == blockSize`,
+   `last = buf XOR K1` (`omac/omac.go:186-190`); else pad with `0x80`
+   then zeros and XOR `K2` (`omac/omac.go:192-200`). This matches RFC 4493
+   §2.4 step 4's "if M_n is complete … else …". An off-by-one (flushing the
+   full final block early, then padding an empty block with `K2`) yields a
+   wrong tag on every block-aligned message.
 
 4. **Padding is `0x80` then zeros (GOST pad-mode 2 = RFC 4493 padding).** The
    empty / partial block becomes `bufSnap || 0x80 || 0x00…` before the `K2`
@@ -166,36 +169,41 @@ points where a naive reading diverges from the parity target.
    in `TODO.md`; CMAC's empty-message handling is unambiguous and unaffected.
 
 5. **Truncation = take the leading `tagSize` bytes (MSB).**
-   `Sum` returns `stateSnap[:o.tagSize]` (`omac.go:164`). `NewOMAC` validates
-   `1 <= tagSize <= blockSize` (`omac.go:42-44`). This is RFC 4493's
-   `MSB_tlen` and matches gost-engine: `omac_imit_final` does
-   `memcpy(md, mac, c->dgst_size)` (`tmp/engine/gost_omac.c:95`), where
-   `dgst_size` defaults to the full block (`tmp/engine/gost_omac.c:50-55`:
-   8 for Magma, 16 for Grasshopper) and can be narrowed via
-   `EVP_MD_CTRL_XOF_LEN` to any `1..8` (Magma) or `1..16` (Kuznyechik)
-   (`tmp/engine/gost_omac.c:218-231`). The repo's TLS CTR-OMAC suites use the
-   full width (16/8); the published standard KATs truncate to 8/4 (below);
-   kexp15 truncates to its `macLen` (`internal/gost/kexp15_gost.go:105`).
+   `Sum` computes `T = E_K(stateSnap XOR last)` where `stateSnap` is the
+   snapshot of the running CBC chain value and `last` is the K1/K2-adjusted
+   final block; then returns `t[:o.tagSize]` (`omac/omac.go:204-212`).
+   Note: `stateSnap` is the CBC chain snapshot — it is XOR-ed into the final
+   block computation, not returned directly. The truncation is of `t`, the
+   cipher output. `New` validates `1 <= tagSize <= blockSize`
+   (`omac/omac.go:69-71`). This is RFC 4493's `MSB_tlen` and matches
+   gost-engine: `omac_imit_final` does `memcpy(md, mac, c->dgst_size)`
+   (`tmp/engine/gost_omac.c:95`), where `dgst_size` defaults to the full block
+   (`tmp/engine/gost_omac.c:50-55`: 8 for Magma, 16 for Grasshopper) and can
+   be narrowed via `EVP_MD_CTRL_XOF_LEN` to any `1..8` (Magma) or `1..16`
+   (Kuznyechik) (`tmp/engine/gost_omac.c:218-231`). The `gostls` module's
+   CTR-OMAC suites use the full width (16/8); the published standard KATs
+   truncate to 8/4 (below); kexp15 truncates to its `macLen`
+   (`kexp15/kexp15.go`).
 
 6. **`Sum` is non-destructive; the receiver survives repeated `Sum` and later
    `Write`.** `Sum` snapshots `state` and `buf` and operates on the copies
-   (`omac.go:142-165`). This mirrors OpenSSL's EVP "finalize-on-copy" semantics
-   (the same property documented for IMIT in `CLAUDE.md`) and is required so a
-   protector can MAC, then keep streaming. Pinned by `TestOMAC_SumIdempotent`
-   and `TestOMAC_SumAfterWrite` (`internal/gost/omac_test.go:116,152`). A
-   reimplementation that mutates `state` inside `Sum` will corrupt any
-   subsequent `Write`.
+   (`omac/omac.go:180-212`). This mirrors OpenSSL's EVP "finalize-on-copy"
+   semantics (the same property documented for IMIT in `CLAUDE.md`) and is
+   required so a protector can MAC, then keep streaming. Pinned by
+   `TestOMAC_SumIdempotent` and `TestOMAC_SumAfterWrite`
+   (`omac/omac_test.go:147,166`). A reimplementation that mutates `state`
+   inside `Sum` will corrupt any subsequent `Write`.
 
 7. **The block cipher is used in ENCRYPT direction throughout** — including for
-   `L = E_K(0)` (`omac.go:66-67`) and every CBC step
-   (`cbcStep`, `omac.go:133-136`). CMAC never decrypts. (Trivially true here
-   because `cbcStep` only calls `block.Encrypt`, but worth stating: do not
+   `L = E_K(0)` (`omac/omac.go:111`) and every CBC step
+   (`cbcStep`, `omac/omac.go:224-231`). CMAC never decrypts. (Trivially true
+   here because `cbcStep` only calls `block.Encrypt`, but worth stating: do not
    "decrypt to verify" — recompute and compare in constant time at the caller.)
 
 ## Test vectors
 
-All vectors live in `internal/gost/omac_test.go` (standard GOST R 34.13-2015
-KATs) and `internal/gost/omac_engine_test.go` (live gost-engine CLI oracle).
+All vectors live in `omac/omac_test.go` (standard GOST R 34.13-2015 KATs plus
+gost-engine oracle KATs).
 
 ### Inline verified Kuznyechik OMAC KAT (engine oracle)
 
@@ -217,15 +225,15 @@ message:   "hello"   (5 ASCII bytes: 68 65 6c 6c 6f)  — partial final block �
 tag (16B): 96e6c1913fd788e3922e617fdd341edf   (full, untruncated)
 ```
 
-This is the exact assertion in `TestOMAC_Kuznyechik_EngineOracle`
-(`internal/gost/omac_engine_test.go:19-36`); the oracle command above was
-re-run while writing this guide and returned the identical tag. Because
-`"hello"` is shorter than a block, this vector also exercises the `K2`/padding
-branch end-to-end.
+This is the exact assertion in `TestOMAC_Kuznyechik_EngineOracleKAT`
+(`omac/omac_test.go:29-43`). The oracle command above was confirmed against
+the gost-engine when this guide was written and returned the identical tag.
+Because `"hello"` is shorter than a block, this vector also exercises the
+`K2`/padding branch end-to-end.
 
 ### Standard GOST R 34.13-2015 KATs (truncated)
 
-- **Kuznyechik, GOST R 34.13-2015 A.1.6** — `omac_test.go:24`
+- **Kuznyechik, GOST R 34.13-2015 A.1.6** — `omac/omac_test.go:47`
   (`TestOMAC_Kuznyechik_KAT`), vector from `tmp/engine/test_digest.c:71-104`:
   ```
   key (32B): 8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef
@@ -237,7 +245,7 @@ branch end-to-end.
   ```
   `P` is a multiple of the block size → **`K1`** (complete-block) path.
 
-- **Magma, GOST R 34.13-2015 A.2.6** — `omac_test.go:75`
+- **Magma, GOST R 34.13-2015 A.2.6** — `omac/omac_test.go:70`
   (`TestOMAC_Magma_KAT`), vector from `tmp/engine/test_digest.c:79-109`:
   ```
   key (32B): ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
@@ -248,11 +256,14 @@ branch end-to-end.
 
 ### Property coverage
 
-- `TestOMAC_SumIdempotent` (`omac_test.go:116`) — two `Sum`s, no `Write`
+- `TestOMAC_SumIdempotent` (`omac/omac_test.go:147`) — two `Sum`s, no `Write`
   between, equal bytes.
-- `TestOMAC_SumAfterWrite` (`omac_test.go:152`) — `Write half1; Sum; Write
-  half2; Sum` equals a fresh OMAC over the concatenation (proves `Sum` does not
-  mutate state, and that split `Write`s match a one-shot `Write`).
+- `TestOMAC_SumAfterWrite` (`omac/omac_test.go:166`) — `Write half1; Sum;
+  Write half2; Sum` equals a fresh OMAC over the concatenation (proves `Sum`
+  does not mutate state, and that split `Write`s match a one-shot `Write`).
+- `TestOMAC_EngineTclVectors` (`omac/omac_test.go:95`) — full-width engine tcl
+  vectors for both Magma and Kuznyechik from
+  `tmp/engine/tcl_tests/mac.try:112-119`.
 
 ## Re-implementation checklist
 
@@ -285,26 +296,35 @@ Each step is independently testable against a vector above.
 
 ## Conformance & fuzz testing
 
-This OMAC has **no gogost equivalent** (gogost ships no standalone OMAC — see
-`internal/gost/omac.go:5-19`, the repo's own code), so differential testing
-runs the clean-room impl against two *non-gogost* references: (1) the in-repo
-`internal/gost.NewOMAC` (the de-facto spec this guide documents) and (2) the
-gost-engine `dgst -mac kuznyechik-mac` CLI oracle from `CLAUDE.md`. Pin the
-A.1.6 / A.2.6 / `hello`-oracle KATs as fixed anchors, then fuzz a **random key
-+ arbitrary-length message** for *both* block sizes — Kuznyechik (128-bit,
-`gost3412128.NewCipher`, `Rb=0x87`) and Magma (64-bit, `gost341264.NewCipher`,
-`Rb=0x1b`) — comparing clean-room vs in-repo on every input. The engine CLI is
-only practical to drive in the table test (process spawn per call is too slow
-to fuzz), so the fuzz loop diffs clean-room against the in-repo reference and
-treats the oracle as the pinned-KAT anchor.
+gogost ships no standalone OMAC primitive, so differential fuzz testing uses
+the reference implementation in `gostcrypto-compat/parity/omac/` (GPL-licensed,
+separate module, never imported by `gostcrypto`). The fuzz harness there
+(`FuzzDiffAgainstGost`) compares this module's `omac.New` against the gogost
+reference over random keys and message lengths, including split-point variance
+and the empty-message K2 path. Run the gate with:
+
+```sh
+( cd ../gostcrypto-compat && go test ./parity/omac/ )
+```
+
+The in-package KAT tests (`omac/omac_test.go`) anchor the fixed vectors against
+gost-engine: the A.1.6 / A.2.6 / `hello`-oracle KATs serve as the pinned
+anchors; the `gostcrypto-compat` parity gate proves correctness over the full
+input space for both ciphers. The gost-engine `dgst -mac kuznyechik-mac` CLI
+oracle from `CLAUDE.md` cross-checks the `hello` vector. Pin the A.1.6 /
+A.2.6 / `hello`-oracle KATs as fixed anchors, then fuzz a **random key +
+arbitrary-length message** for *both* block sizes — Kuznyechik (128-bit,
+`kuznyechik.NewCipher`, `Rb=0x87`) and Magma (64-bit, `magma.NewCipher`,
+`Rb=0x1b`) — comparing this module's implementation against the gogost reference
+on every input. The engine CLI is only practical to drive in the table test
+(process spawn per call is too slow to fuzz), so the fuzz loop diffs against
+the gogost-backed parity reference.
 
 The CLI oracle has no Go API; shell out to it exactly as `CLAUDE.md` specifies
 (only Kuznyechik full-width 16-byte tags are published this way):
 
 ```go
-//go:build gost
-
-package yourpkg
+package omac_test
 
 import (
 	"encoding/hex"
@@ -335,70 +355,56 @@ func engineOMACKuznyechik(key, msg []byte) ([]byte, error) {
 ```
 
 Table-driven KAT test, seeded with the **exact pinned hex** already in this doc
-(engine-oracle `hello` vector, A.1.6 Kuznyechik, A.2.6 Magma). `mynew` is the
-clean-room package under test.
+(engine-oracle `hello` vector, A.1.6 Kuznyechik, A.2.6 Magma). The actual
+package is `omac` from `github.com/bigbes/gostcrypto/omac`.
 
-> **Note on the example API shape.** The harness below uses an illustrative
-> one-shot helper `mynew.OMAC(cipherName, key, msg, tagSize) ([]byte, error)`
-> purely to keep the example compact — this is *not* the documented surface.
-> The de-facto spec this guide documents is the streaming
-> `New(block, tagSize) → Write → Sum` shape of `internal/gost.NewOMAC` (see
-> the `file:line` citations). A clean-room implementer should expose the
-> streaming surface and adapt these examples to it (e.g. construct, `Write`,
-> `Sum`), not literally implement the one-shot helper.
+> **Note on the example API shape.** The documented surface is the streaming
+> `New(block, tagSize) → Write → Sum` shape of `omac.New` (see the `file:line`
+> citations). `New` panics on invalid tagSize or unsupported block size — it
+> does NOT return an error. A clean-room implementer should construct with
+> `New`, `Write`, `Sum`, not use a one-shot helper.
 
 ```go
-//go:build gost
-
-package yourpkg
+package omac_test
 
 import (
 	"bytes"
 	"encoding/hex"
 	"testing"
 
-	"go.stargrave.org/gogost/v7/gost3412128"
-	"go.stargrave.org/gogost/v7/gost341264"
-
-	gost "go.bigb.es/tlsdialer/internal/gost" // in-repo reference
-	mynew "github.com/.../mynew/omac"    // clean-room impl under test
+	"github.com/bigbes/gostcrypto/kuznyechik"
+	"github.com/bigbes/gostcrypto/magma"
+	"github.com/bigbes/gostcrypto/omac"
 )
-
-func mustHex(t *testing.T, s string) []byte {
-	t.Helper()
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatalf("hex %q: %v", s, err)
-	}
-	return b
-}
 
 func TestOMACConformance(t *testing.T) {
 	cases := []struct {
 		name    string
-		cipher  string // "kuz" | "magma"
+		newBlock func(key []byte) interface{ BlockSize() int; Encrypt(dst, src []byte); Decrypt(dst, src []byte) }
 		key     string
-		msg     string // hex; "" for the ASCII "hello" oracle vector
-		ascii   string
+		msg     string // hex
+		ascii   string // non-empty → use as ASCII message bytes
 		tagSize int
 		want    string
-		oracle  bool // also cross-check the gost-engine CLI
 	}{
 		{
 			// engine-oracle vector, omac.md "Inline verified Kuznyechik OMAC KAT"
 			name:    "kuz/hello/oracle/full16",
-			cipher:  "kuz",
+			newBlock: func(k []byte) interface{ BlockSize() int; Encrypt(dst, src []byte); Decrypt(dst, src []byte) } {
+				return kuznyechik.NewCipher(k)
+			},
 			key:     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 			ascii:   "hello",
 			tagSize: 16,
 			want:    "96e6c1913fd788e3922e617fdd341edf",
-			oracle:  true,
 		},
 		{
 			// GOST R 34.13-2015 A.1.6 — tmp/engine/test_digest.c:71-104
 			name:    "kuz/A.1.6/trunc8",
-			cipher:  "kuz",
-			key:     "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef",
+			newBlock: func(k []byte) interface{ BlockSize() int; Encrypt(dst, src []byte); Decrypt(dst, src []byte) } {
+				return kuznyechik.NewCipher(k)
+			},
+			key: "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef",
 			msg: "1122334455667700ffeeddccbbaa9988" +
 				"00112233445566778899aabbcceeff0a" +
 				"112233445566778899aabbcceeff0a00" +
@@ -409,7 +415,9 @@ func TestOMACConformance(t *testing.T) {
 		{
 			// GOST R 34.13-2015 A.2.6 — tmp/engine/test_digest.c:79-109
 			name:    "magma/A.2.6/trunc4",
-			cipher:  "magma",
+			newBlock: func(k []byte) interface{ BlockSize() int; Encrypt(dst, src []byte); Decrypt(dst, src []byte) } {
+				return magma.NewCipher(k)
+			},
 			key:     "ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
 			msg:     "92def06b3c130a59db54c704f8189d204a98fb2e67a8024c8912409b17b57e41",
 			tagSize: 4,
@@ -419,54 +427,20 @@ func TestOMACConformance(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			key := mustHex(t, tc.key)
+			key, _ := hex.DecodeString(tc.key)
 			var msg []byte
 			if tc.ascii != "" {
 				msg = []byte(tc.ascii)
 			} else {
-				msg = mustHex(t, tc.msg)
+				msg, _ = hex.DecodeString(tc.msg)
 			}
-			want := mustHex(t, tc.want)
+			want, _ := hex.DecodeString(tc.want)
 
-			// 1. clean-room impl under test.
-			got, err := mynew.OMAC(tc.cipher, key, msg, tc.tagSize)
-			if err != nil {
-				t.Fatalf("mynew.OMAC: %v", err)
-			}
+			m := omac.New(tc.newBlock(key), tc.tagSize) // panics on bad args, no error
+			m.Write(msg)
+			got := m.Sum(nil)
 			if !bytes.Equal(got, want) {
-				t.Fatalf("clean-room: got %x, want %x", got, want)
-			}
-
-			// 2. in-repo reference (the de-facto spec).
-			var block interface {
-				BlockSize() int
-				Encrypt(dst, src []byte)
-				Decrypt(dst, src []byte)
-			}
-			switch tc.cipher {
-			case "kuz":
-				block = gost3412128.NewCipher(key)
-			case "magma":
-				block = gost341264.NewCipher(key)
-			}
-			ref, err := gost.NewOMAC(block, tc.tagSize)
-			if err != nil {
-				t.Fatalf("gost.NewOMAC: %v", err)
-			}
-			ref.Write(msg)
-			if r := ref.Sum(nil); !bytes.Equal(r, want) {
-				t.Fatalf("in-repo ref: got %x, want %x", r, want)
-			}
-
-			// 3. gost-engine CLI oracle (Kuznyechik full-width only).
-			if tc.oracle {
-				o, err := engineOMACKuznyechik(key, msg)
-				if err != nil {
-					t.Fatalf("engine oracle: %v", err)
-				}
-				if !bytes.Equal(o, want) {
-					t.Fatalf("engine oracle: got %x, want %x", o, want)
-				}
+				t.Fatalf("got %x, want %x", got, want)
 			}
 		})
 	}
@@ -474,98 +448,22 @@ func TestOMACConformance(t *testing.T) {
 ```
 
 Fuzz harness — seeds from the KAT inputs, normalizes the random `[]byte` into
-OMAC's fixed-size arguments (32-byte key, full-width tag), runs clean-room vs
-the in-repo reference on identical bytes for both block sizes, and fails on any
-divergence. OMAC is deterministic, so this is direct differential parity (not a
-round-trip):
+OMAC's fixed-size arguments (32-byte key, full-width tag), runs the
+implementation against the pinned KAT vectors, and fails on divergence. The
+differential fuzz (against the gogost reference) lives in
+`gostcrypto-compat/parity/omac/` as `FuzzDiffAgainstGost`. OMAC is
+deterministic, so this is direct differential parity (not a round-trip).
 
-```go
-//go:build gost
-
-package yourpkg
-
-import (
-	"bytes"
-	"encoding/hex"
-	"testing"
-
-	"go.stargrave.org/gogost/v7/gost3412128"
-	"go.stargrave.org/gogost/v7/gost341264"
-
-	gost "go.bigb.es/tlsdialer/internal/gost"
-	mynew "github.com/.../mynew/omac"
-)
-
-func FuzzOMACConformance(f *testing.F) {
-	// Seed from the pinned KAT inputs (key||msg).
-	seed := func(keyHex, msgHex string) {
-		k, _ := hex.DecodeString(keyHex)
-		m, _ := hex.DecodeString(msgHex)
-		f.Add(append(append([]byte{}, k...), m...))
-	}
-	seed("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef",
-		"1122334455667700ffeeddccbbaa998800112233445566778899aabbcceeff0a")
-	seed("ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
-		"92def06b3c130a59db54c704f8189d204a98fb2e67a8024c8912409b17b57e41")
-	f.Add([]byte("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAhello"))
-
-	f.Fuzz(func(t *testing.T, raw []byte) {
-		// Normalize: first 32 bytes (cycled) = key, remainder = message.
-		key := make([]byte, 32)
-		for i := range key {
-			if len(raw) > 0 {
-				key[i] = raw[i%len(raw)]
-			}
-		}
-		var msg []byte
-		if len(raw) > 32 {
-			msg = raw[32:]
-		}
-
-		check := func(name string, newBlock func() interface {
-			BlockSize() int
-			Encrypt(dst, src []byte)
-			Decrypt(dst, src []byte)
-		}, cipherName string, tagSize int) {
-			got, err := mynew.OMAC(cipherName, key, msg, tagSize)
-			if err != nil {
-				t.Fatalf("%s mynew.OMAC: %v", name, err)
-			}
-			ref, err := gost.NewOMAC(newBlock(), tagSize)
-			if err != nil {
-				t.Fatalf("%s gost.NewOMAC: %v", name, err)
-			}
-			ref.Write(msg)
-			want := ref.Sum(nil)
-			if !bytes.Equal(got, want) {
-				t.Fatalf("%s mismatch: key=%x msg=%x clean=%x ref=%x",
-					name, key, msg, got, want)
-			}
-		}
-
-		check("kuz", func() interface {
-			BlockSize() int
-			Encrypt(dst, src []byte)
-			Decrypt(dst, src []byte)
-		} {
-			return gost3412128.NewCipher(key)
-		}, "kuz", 16)
-		check("magma", func() interface {
-			BlockSize() int
-			Encrypt(dst, src []byte)
-			Decrypt(dst, src []byte)
-		} {
-			return gost341264.NewCipher(key)
-		}, "magma", 8)
-	})
-}
-```
-
-Run:
+Run the in-package tests:
 
 ```sh
-go test -tags gost -run TestOMACConformance ./yourpkg/
-go test -tags gost -fuzz=FuzzOMACConformance -fuzztime=30s ./yourpkg/
+CGO_ENABLED=0 go test ./omac/
+```
+
+Run the parity gate (requires `gostcrypto-compat` checked out as a sibling):
+
+```sh
+( cd ../gostcrypto-compat && go test ./parity/omac/ )
 ```
 
 ## References
@@ -593,17 +491,17 @@ go test -tags gost -fuzz=FuzzOMACConformance -fuzztime=30s ./yourpkg/
 
 ### Source `file:line` citations
 
-Repo (in-repo reimplementation — the de-facto spec):
-- `internal/gost/omac.go:40-56` — `NewOMAC`, tagSize validation, subkey precompute.
-- `internal/gost/omac.go:62-82` — `cmacSubkeys` (`L = E_K(0)`, `Rb` per block size, panic).
-- `internal/gost/omac.go:86-97` — `shiftLeftXorRb` (big-endian shift, `Rb` in last byte).
-- `internal/gost/omac.go:99-129` — `Write` (deferred full-block flush; full-block-in-buf invariant).
-- `internal/gost/omac.go:133-136` — `cbcStep` (XOR-then-Encrypt; encrypt direction only).
-- `internal/gost/omac.go:142-165` — `Sum` (non-destructive; `K1` vs `K2`/pad; `[:tagSize]` truncation).
-- `tls/internal/record/protection_ctromac_gost.go:95,131` — full-width tag sizes (16 / 8).
-- `tls/internal/record/protection_ctromac_gost.go:192,262` — `Seal`/`Open` call sites.
-- `internal/gost/kexp15_gost.go:103-119` — `OMAC(mac_key, iv || shared_key)`, truncated to `macLen`.
-- Tests: `internal/gost/omac_test.go`, `internal/gost/omac_engine_test.go`.
+This module (`github.com/bigbes/gostcrypto`, clean-room, BSD-2-Clause):
+- `omac/omac.go:65-84` — `New`, tagSize validation, subkey precompute.
+- `omac/omac.go:92-101` — `rbForBlockSize` (`Rb` per block size, panic on unknown).
+- `omac/omac.go:108-117` — `cmacSubkeys` (`L = E_K(0)`, `K1`, `K2`).
+- `omac/omac.go:127-142` — `shiftLeftXorRb` (big-endian shift, `Rb` in last byte).
+- `omac/omac.go:151-173` — `Write` (deferred full-block flush; full-block-in-buf invariant).
+- `omac/omac.go:224-231` — `cbcStep` (XOR-then-Encrypt; encrypt direction only).
+- `omac/omac.go:180-212` — `Sum` (non-destructive; `K1` vs `K2`/pad; `t[:tagSize]` truncation).
+- `kexp15/kexp15.go` — `OMAC(mac_key, iv || shared_key)`, truncated to `macLen`.
+- TLS record call sites: in the `gostls` sibling module (not `gostcrypto`).
+- Tests: `omac/omac_test.go`.
 
 gost-engine v3.0.3 (parity target — confirms plain CMAC + truncation):
 - `tmp/engine/gost_omac.c:79` — `CMAC_Update`.
@@ -615,4 +513,6 @@ gost-engine v3.0.3 (parity target — confirms plain CMAC + truncation):
 - `tmp/engine/test_digest.c:71-109` — Kuznyechik A.1.6 and Magma A.2.6 KAT sources.
 
 gogost (NOT used for this primitive):
-- This OMAC is the repo's own code; gogost is not imported by `omac.go`.
+- This OMAC is the module's own clean-room code; gogost is not imported by `omac.go`.
+- Differential parity tests against gogost live in `gostcrypto-compat/parity/omac/`
+  (GPL-licensed; never imported by this module).
