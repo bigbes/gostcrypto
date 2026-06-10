@@ -24,25 +24,22 @@ GOST / RFC identity:
   GOST R 34.12-2015 (Kuznyechik / Magma block ciphers — only relevant for which
   *constant set* applies; TLSTREE itself uses no block cipher).
 
-Where this repo uses it (call sites, grepped):
+Where this module uses it (call sites, grepped):
 
-- `tls/internal/record/protection_ctromac_gost.go:58-59` — every
-  `ctrOMACProtector` owns two trees, `encTree` and `macTree`. Constructed at
-  `:97-98` (Kuznyechik) and `:133-134` (Magma). One protector exists per
-  direction (client→server, server→client), so a connection has **four trees
-  total**: {enc, mac} × {read, write}.
-- `tls/internal/record/protection_ctromac_gost.go` calls `tree.Derive(seqNum)`
-  on each Seal/Open to obtain the fresh CTR key and the fresh OMAC key for that
-  record.
-- `internal/gost/tlstree_gost.go` — the wrappers
-  `NewTLSTreeKuznyechikCTROMAC` / `NewTLSTreeMagmaCTROMAC` / `Derive`.
+- `github.com/bigbes/gostls` (`gostls/`) — the TLS record-layer protector
+  `ctrOMACProtector` owns two trees, `encTree` and `macTree`, one per direction
+  (client→server / server→client), so a connection has **four trees total**:
+  {enc, mac} × {read, write}. Each Seal/Open calls `tree.Derive(seqNum)` to
+  obtain the fresh CTR key and the fresh OMAC key for that record.
 - Suites that pull it in: `0xC100` GOST2012-KUZNYECHIK-KUZNYECHIKOMAC and
-  `0xC101` GOST2012-MAGMA-MAGMAOMAC (`tls/internal/suites/gost_suites.go:80-85`).
+  `0xC101` GOST2012-MAGMA-MAGMAOMAC.
 
-**Status: `gogost-backed`.** `internal/gost/tlstree_gost.go` forwards directly to
-`go.stargrave.org/gogost/v7/gost34112012256.NewTLSTree` /`DeriveCached`
-(`third_party/gogost/gost34112012256/tlstree.go`). A GPL-free reimplementation
-must replace that forwarding with a local implementation of the algorithm below.
+**Status: clean-room, implemented.** `tlstree/tlstree.go` is the completed
+GPL-free implementation: it imports only `github.com/bigbes/gostcrypto/streebog`
+and the Go standard library. All tests live in `tlstree/tlstree_test.go`.
+The differential parity tests (comparing against gogost) live in the
+GPL-quarantined `gostcrypto-compat` module at
+`gostcrypto-compat/parity/tlstree/tlstree_parity_test.go`.
 
 ## Specification
 
@@ -68,8 +65,8 @@ K3 = KDF_GOSTR3411_2012_256(K2,     "level3", STR_8(i & C_3))   // the result
   is **32 bytes** (KDF output is fixed 256 bits). The constructor MUST enforce
   the 32-byte master-key length and **panic** on any other length (it is a
   programmer error, not a runtime condition — no truncation, no zero-padding).
-  This matches the in-repo wrapper (`internal/gost/tlstree_gost.go:32-34,48-50`)
-  and is what the panic tests at `internal/gost/tlstree_test.go:119-140` assert.
+  This is enforced by `NewTLSTree{Kuznyechik,Magma}CTROMAC` and tested in
+  `tlstree/tlstree_test.go:TestMasterKeyLength`.
 - `i` is the **64-bit TLS record sequence number**.
 - `STR_8(x)` serializes a 64-bit integer to **8 bytes, network byte order
   (big-endian)** — see the endianness note in deltas; this is the surprising
@@ -123,8 +120,8 @@ vary inside a leaf window.
 
 The leaf window (number of consecutive `i` that map to the same final key) is
 `~C_3 + 1`: 64 for Kuznyechik (`0x40`), 4096 for Magma (`0x1000`). This is the
-basis of the cache check (see deltas) and of the unit-test windowing assertions
-(`internal/gost/tlstree_test.go:44-56`).
+basis of the unit-test windowing assertions
+(`tlstree/tlstree_test.go:TestWindowing`).
 
 These exact hex values appear in gogost as big-endian byte literals at
 `third_party/gogost/gost34112012256/tlstree.go:30-34` (Kuznyechik) and `:25-29`
@@ -189,34 +186,33 @@ filled**. So if the very first call is `DeriveCached(seqNum)` with `seqNum>0`
 but `seqNum` in the same leaf window as `0` (e.g. Kuznyechik `seqNum ∈ 1..63`,
 Magma `seqNum ∈ 1..4095`), all three comparisons pass against `seqNumPrev=0`,
 the cache "hits", and the function returns **32 zero bytes** — never having run
-the KDF tree. This is documented in `CLAUDE.md` ("gogost/v7 library gotchas")
-and in `internal/gost/tlstree_engine_test.go:14-20`.
+the KDF tree. This is documented in `CLAUDE.md` ("gogost/v7 library gotchas").
 
 **Mitigations / contract for a reimplementer:**
 
-- The repo's wrapper does **not** prime. Callers must call `Derive(0)` first.
-  In real TLS this is automatic: the first protected record (Finished) is always
+- In real TLS this is automatic: the first protected record (Finished) is always
   `seq=0`, which is never a cache hit (`seqNum > 0` guard fails), so it runs the
   full tree and fills the cache (`tmp/engine/test_tlstree.c:119` uses `seq0`
-  first, then `seq63`). The engine oracle test primes explicitly
-  (`internal/gost/tlstree_engine_test.go:28`).
+  first, then `seq63`).
 - A *clean* reimplementation can simply avoid the bug: initialize `seqNumPrev`
   to a sentinel (e.g. `^uint64(0)`) that no real first sequence equals, OR only
   set the "cache valid" flag after the first real derivation, OR skip caching
   entirely and always run the three KDFs (correct, just slower). If you keep a
   cache, the cache-hit predicate is correct *once primed*; the bug is purely the
   unset-`seqNumPrev`/unfilled-`key` startup race.
+- The clean-room implementation in this module (`tlstree.go`) takes the
+  always-run approach — no caching — so `TestKAT_FirstCallNotZero` and
+  `TestKAT_Kuznyechik_Seq63` guard against the priming trap in
+  `tlstree/tlstree_test.go`.
 
 ### D3 — `Derive` vs `DeriveCached` aliasing (destructive shared buffer)
 
 gogost's `DeriveCached` returns `t.key`, a slice that **points into the tree's
 internal buffer** and is overwritten on the next call
-(`tlstree.go:81,89,91`). `Derive` copies it into a fresh slice (`:94-98`). The
-repo wrapper calls the cached form and copies itself
-(`internal/gost/tlstree_gost.go:63-70`) so callers always get an independent
-32-byte slice. A reimplementation must give the same guarantee the repo relies
-on: `Derive` returns a freshly allocated, non-aliasing 32-byte key
-(asserted by `internal/gost/tlstree_test.go:67-82,108-112`).
+(`third_party/gogost/gost34112012256/tlstree.go:81,89,91`). `Derive` copies it
+into a fresh slice (`:94-98`). A reimplementation must give the same guarantee
+callers rely on: `Derive` returns a freshly allocated, non-aliasing 32-byte key.
+This is asserted by `tlstree/tlstree_test.go:TestDeriveNonAliasing`.
 
 ### D4 — KDF message framing must be exact (no surprises, but easy to fumble)
 
@@ -238,10 +234,9 @@ Two common mistakes:
 Because the requested output is 256 bits = one Streebog block, the KDF runs a
 **single** HMAC (counter fixed at `0x01`). Do not implement the multi-iteration
 KDF_TREE expansion here — TLSTREE needs only the single-block `KDF_GOSTR3411_2012_256`.
-(Contrast with `internal/gost/kdftree_gost.go`, which iterates the counter for
-64-byte outputs; that path is *not* used by TLSTREE. See the
-`gost34112012256.KDF.Derive` note in `CLAUDE.md` — that hardcoded `0x01 0x00`
-suffix is exactly what TLSTREE wants, so the gogost `KDF` type is reused as-is.)
+(Contrast with `github.com/bigbes/gostcrypto/kdftree`, which iterates the
+counter for 64-byte outputs; that path is *not* used by TLSTREE. TLSTREE uses
+only the single-block form.)
 
 ### D6 — Not affected by the three known gogost↔engine divergences
 
@@ -251,16 +246,16 @@ empty-input finalization, (c) CryptoPro key meshing in GOST28147 IMIT.
 
 **None apply to TLSTREE.** TLSTREE uses no block cipher and no GOST R 34.11-94;
 it uses only HMAC-Streebog-256, which never hashes empty input (the message is
-always ≥18 bytes) and has no S-box/meshing surface. The `internal/gost`
-engine-oracle test passing bit-for-bit against gost-engine
-(`tlstree_engine_test.go:30`) confirms parity.
+always ≥18 bytes) and has no S-box/meshing surface. The in-module KATs
+and the compat parity tests in `gostcrypto-compat/parity/tlstree/` confirm parity
+with the gogost reference and gost-engine.
 
 ## Test vectors
 
 ### Inline KAT (runnable immediately) — Kuznyechik TLSTREE, seq=63
 
-From `internal/gost/tlstree_engine_test.go:22-34`, cross-checked against
-gost-engine's `test_keyexpimp.c` (the `tlstree_gh_etalon[]` array at
+Cross-checked against gost-engine's `test_keyexpimp.c` (the
+`tlstree_gh_etalon[]` array at
 `:99-104`, produced by `gost_tlstree(NID_grasshopper_cbc, kroot, out, tlsseq)`
 at `:177` with `kroot = 0xFF×32` (`:129`) and `tlsseq[7] = 63` (`:131`)):
 
@@ -308,12 +303,12 @@ tree (`test_tlstree.c:33-41`).
 
 ### Behavioral / windowing assertions (no external KAT)
 
-`internal/gost/tlstree_test.go`:
-- length = 32, no aliasing (`:62-82`),
+`tlstree/tlstree_test.go`:
+- length = 32, no aliasing (`TestDeriveNonAliasing`),
 - same leaf window → identical key, cross-window → different key
-  (window=64 Kuznyechik, 4096 Magma) (`:84-99`),
-- determinism (`:101-112`),
-- 32-byte master-key length enforcement (`:119-140`).
+  (window=64 Kuznyechik, 4096 Magma) (`TestWindowing`),
+- determinism (`TestDeterminism`),
+- 32-byte master-key length enforcement (`TestMasterKeyLength`).
 
 ## Re-implementation checklist
 
@@ -325,8 +320,8 @@ Each step is independently testable.
 2. **Single-block `KDF_GOSTR3411_2012_256(K, label, seed)`.** Build the 18-byte
    message `0x01 | label | 0x00 | seed | 0x01 | 0x00` and HMAC it with key `K`;
    return the full 32-byte tag. Test: feed `K=32×0xFF`, `label="level1"`,
-   `seed=8×0x00`, compare K1 against the engine (or against a one-shot run of
-   the gogost path while you still have it).
+   `seed=8×0x00`, compare K1 against gost-engine or the pinned seq=63 KAT
+   (the intermediate K1 is implicitly validated by the leaf KAT).
 3. **Constant tables.** Encode the six masks from RFC 9189 §8.1.1 (tables above)
    for Kuznyechik and Magma. Test: assert your `C_3` window equals 64 / 4096.
 4. **Seed serialization (D1).** `STR_8(i & C_n)` = big-endian 8 bytes of the
@@ -343,173 +338,48 @@ Each step is independently testable.
    tree MUST return `5076 42d9 …`, not zeros. Then `Derive(0)` then `Derive(63)`
    must be equal (same window).
 7. **Wire into the protector.** Confirm enc-tree and mac-tree each `Derive` once
-   per record (`protection_ctromac_gost.go`), keys are 32 bytes, and the seq=0
-   and seq=63 end-to-end OMAC/CTR etalons from `test_tlstree.c` pass.
+   per record in `gostls/`, keys are 32 bytes, and the seq=0 and seq=63
+   end-to-end OMAC/CTR etalons from `tmp/engine/test_tlstree.c` pass.
 
 ## Conformance & fuzz testing
 
-Differential strategy for THIS primitive: the clean-room `Derive` is checked
-against two reference targets that already live in the repo — (1) the in-repo
-`internal/gost.TLSTree` wrapper (`internal/gost/tlstree_gost.go:63-70`), which
-copies out a fresh 32-byte slice, and (2) the pinned Kuznyechik seq=63 hex
-vector from the *Test vectors* section above. There is **no CLI oracle leg**
-here: TLSTREE is a pure gogost-backed key derivation, not one of the
-OMAC/CTR-ACPKM/KEG/KExp15/KeyWrap primitives that only the gost-engine `openssl`
-binary can answer for — so both reference legs are in-process Go. Before each
-diff against the wrapper, prime it with `Derive(0)` to dodge the documented
-zero-key startup trap (D2 above; `internal/gost/tlstree_engine_test.go:27-28`):
-a *fresh* `Derive(63)` on the wrapper would return 32 zero bytes, not the real
-leaf key. The clean-room impl must NOT reproduce that bug, so the fuzz harness
-primes only the reference, never `mynew`. Fuzz over a random 32-byte master key
-and a monotonic `seqNum` sequence, and assert the leaf key changes exactly at
-the documented window boundary — 64 records for Kuznyechik (`C_3=…C0`), 4096 for
-Magma (`C_3=…000`): `Derive(w-1) == Derive(0)` within a window, `Derive(w) !=
-Derive(0)` across it.
+**Current status:** the clean-room implementation is complete. In-module tests
+cover KATs, windowing, aliasing, determinism, and the D2 priming guard. The
+differential parity tests (comparing against gogost) live in the GPL-quarantined
+module at `gostcrypto-compat/parity/tlstree/tlstree_parity_test.go` — they run
+`Test_TLSTree_Conformance` (2 suites × 4 masters × 12 seq numbers) and
+`Fuzz_TLSTree_Conformance` (random master + seq + suite, oracle diff + window
+invariant).
 
-### KAT — pinned vector, clean-room vs in-repo wrapper
+The differential strategy: `Derive` output is compared against gogost's
+`gost34112012256.NewTLSTree(...).Derive(seq)`. Before each diff, the gogost
+reference must be primed with `Derive(0)` to avoid the D2 zero-key trap. The
+clean-room implementation must NOT be primed — guarded by
+`TestKAT_FirstCallNotZero`.
 
-Reuses the exact bytes pinned above (`K_root = 32×0xFF`, seq=63 ⇒
-`507642d9…641a19ff`; `internal/gost/tlstree_engine_test.go:30`). Replace the
-`mynew` alias with your clean-room package.
+### KAT — pinned gost-engine vector
 
-```go
-//go:build gost
+`K_root = 32×0xFF`, seq=63 ⇒ `507642d9…641a19ff`
+(source: `tmp/engine/test_keyexpimp.c:99-104,177,184`, confirmed by
+`tlstree/tlstree_test.go:TestKAT_Kuznyechik_Seq63`).
 
-package mynew_test
+### Parity test location
 
-import (
-	"bytes"
-	"encoding/hex"
-	"testing"
-
-	gostref "go.bigb.es/tlsdialer/internal/gost" // in-repo reference
-	mynew "github.com/.../your/tlstree"      // clean-room impl under test
-)
-
-func mustHex(s string) []byte { b, _ := hex.DecodeString(s); return b }
-
-func Test_TLSTree_Conformance(t *testing.T) {
-	kFF := bytes.Repeat([]byte{0xFF}, 32)
-	cases := []struct {
-		name   string
-		master []byte
-		seq    uint64
-		// newRef builds the in-repo reference tree; newNew the clean-room one.
-		newRef func([]byte) *gostref.TLSTree
-		newNew func([]byte) *mynew.TLSTree
-		want   string
-	}{
-		{
-			name:   "kuznyechik/seq63",
-			master: kFF,
-			seq:    63,
-			newRef: gostref.NewTLSTreeKuznyechikCTROMAC,
-			newNew: mynew.NewTLSTreeKuznyechikCTROMAC,
-			// Pinned in tlstree.md "Inline KAT".
-			want: "507642d958c520c6d7eef5ca8a5316d4f34b855d2dd4bcbf4e5bf0ff641a19ff",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			want := mustHex(tc.want)
-
-			// Reference: prime with Derive(0) to avoid the D2 zero-key trap.
-			ref := tc.newRef(tc.master)
-			_ = ref.Derive(0)
-			gotRef := ref.Derive(tc.seq)
-			if !bytes.Equal(gotRef, want) {
-				t.Fatalf("reference mismatch: got %x want %x", gotRef, want)
-			}
-
-			// Clean-room: must hit the pinned vector on the *first* call
-			// (no priming) — it must not carry gogost's startup bug.
-			gotNew := tc.newNew(tc.master).Derive(tc.seq)
-			if !bytes.Equal(gotNew, want) {
-				t.Fatalf("clean-room mismatch: got %x want %x", gotNew, want)
-			}
-		})
-	}
-}
+```
+gostcrypto-compat/parity/tlstree/tlstree_parity_test.go
 ```
 
-### Fuzz — clean-room vs in-repo wrapper over random key + seq
-
-Seeds from the KAT inputs, normalizes the raw fuzz `[]byte` into this
-primitive's fixed-size args (32-byte master key + a `uint64` seq), runs both
-references identically, and additionally asserts the window-boundary invariant.
-
-```go
-//go:build gost
-
-package mynew_test
-
-import (
-	"bytes"
-	"encoding/binary"
-	"testing"
-
-	gostref "go.bigb.es/tlsdialer/internal/gost"
-	mynew "github.com/.../your/tlstree"
-)
-
-func Fuzz_TLSTree_Conformance(f *testing.F) {
-	// Seed corpus from the KAT: 32×0xFF master, seq=63, Kuznyechik(0).
-	f.Add(bytes.Repeat([]byte{0xFF}, 32), uint64(63), false)
-	f.Add(bytes.Repeat([]byte{0x00}, 32), uint64(0), false)
-	f.Add(bytes.Repeat([]byte{0x11}, 32), uint64(4096), true)
-
-	f.Fuzz(func(t *testing.T, raw []byte, seq uint64, magma bool) {
-		// Normalize the random []byte into a fixed 32-byte master key.
-		master := make([]byte, 32)
-		copy(master, raw) // short raw → zero-padded; long raw → truncated
-
-		newRef, newNew := gostref.NewTLSTreeKuznyechikCTROMAC, mynew.NewTLSTreeKuznyechikCTROMAC
-		window := uint64(64) // Kuznyechik leaf window (C_3 = ...FFC0)
-		if magma {
-			newRef, newNew = gostref.NewTLSTreeMagmaCTROMAC, mynew.NewTLSTreeMagmaCTROMAC
-			window = 4096 // Magma leaf window (C_3 = ...F000)
-		}
-
-		// Reference must be primed (D2); clean-room must not be.
-		ref := newRef(master)
-		_ = ref.Derive(0)
-		gotRef := ref.Derive(seq)
-		gotNew := newNew(master).Derive(seq)
-		if !bytes.Equal(gotRef, gotNew) {
-			t.Fatalf("mismatch master=%x seq=%d magma=%v\n ref: %x\n new: %x",
-				master, seq, magma, gotRef, gotNew)
-		}
-
-		// Window invariant: same leaf window ⇒ identical key; crossing it ⇒ change.
-		base := seq - (seq % window) // window start
-		mn := newNew(master)
-		k0 := mn.Derive(base)
-		kIn := newNew(master).Derive(base + window - 1)
-		kOut := newNew(master).Derive(base + window)
-		if !bytes.Equal(k0, kIn) {
-			t.Fatalf("intra-window key changed: master=%x base=%d window=%d", master, base, window)
-		}
-		if bytes.Equal(k0, kOut) {
-			t.Fatalf("cross-window key unchanged: master=%x base=%d window=%d", master, base, window)
-		}
-	})
-}
-```
-
-Note on the reference leg: `internal/gost.TLSTree` exposes only
-`NewTLSTree{Kuznyechik,Magma}CTROMAC(master []byte) *TLSTree` and
-`(*TLSTree).Derive(seqNum uint64) []byte` (`internal/gost/tlstree_gost.go:31,47,63`);
-the clean-room impl must mirror that surface for the scaffolding above to
-compile unchanged. If you prefer to diff against raw gogost directly instead of
-the wrapper, call `gost34112012256.NewTLSTree(gost34112012256.TLSGOSTR341112256WithKuznyechikCTROMAC,
-master).Derive(seq)` — but `Derive` there has the same D2 priming requirement,
-so prime it identically.
-
-### Run commands
+Run from the compat module (requires the GPL gogost reference):
 
 ```sh
-go test -tags gost -run Test_TLSTree_Conformance ./yourpkg/
-go test -tags gost -fuzz=Fuzz_TLSTree_Conformance -fuzztime=30s ./yourpkg/
+( cd ../gostcrypto-compat && go test ./parity/tlstree/ -v )
+( cd ../gostcrypto-compat && go test -fuzz=Fuzz_TLSTree_Conformance -fuzztime=30s ./parity/tlstree/ )
+```
+
+### In-module run commands
+
+```sh
+( cd gostcrypto && CGO_ENABLED=0 go test ./tlstree/ -v )
 ```
 
 ## References
@@ -530,13 +400,12 @@ go test -tags gost -fuzz=Fuzz_TLSTree_Conformance -fuzztime=30s ./yourpkg/
 Key source citations:
 
 - gogost reference impl (de-facto spec the repo matches, GPL-3.0 — described not
-  copied):
-  - `third_party/gogost/gost34112012256/tlstree.go:25-34` — constant byte
-    literals (Magma `:25-29`, Kuznyechik `:30-34`).
-  - `third_party/gogost/gost34112012256/tlstree.go:76-92` — `DeriveCached`
-    (cache predicate `:77-82`, three-level KDF chain `:83-89`, priming bug
-    surface).
-  - `third_party/gogost/gost34112012256/kdf.go:31-53` — KDF message framing
+  copied; vendored in `gostcrypto-compat/third_party/gogost`):
+  - `gost34112012256/tlstree.go:25-34` — constant byte literals
+    (Magma `:25-29`, Kuznyechik `:30-34`).
+  - `gost34112012256/tlstree.go:76-92` — `DeriveCached` (cache predicate
+    `:77-82`, three-level KDF chain `:83-89`, priming bug surface).
+  - `gost34112012256/kdf.go:31-53` — KDF message framing
     `0x01|label|0x00|seed|0x01|0x00`.
 - gost-engine ground truth (Tarantool's upstream parity target):
   - `tmp/engine/gost_keyexpimp.c:261-305` — `gost_tlstree` (constants `:264-267`,
@@ -550,14 +419,12 @@ Key source citations:
   - `tmp/engine/test_tlstree.c` — end-to-end *downstream* KAT (seq0/seq63 MAC +
     CTR etalons that consume the leaf key, `:33-95`; TLSTREE ctrl calls
     `:119,144,160,178`) — does NOT pin the leaf key itself.
-- Repo wrappers, tests, call sites:
-  - `internal/gost/tlstree_gost.go:31-70` — wrappers + `Derive` copy.
-  - `internal/gost/tlstree_engine_test.go:22-34` — Kuznyechik seq=63 KAT
-    `5076 42d9 …` + priming note.
-  - `internal/gost/tlstree_test.go:30-140` — windowing / aliasing / panic tests.
-  - `tls/internal/record/protection_ctromac_gost.go:58-59,97-98,133-134` — the
-    four-trees-per-connection call sites.
-  - `tls/internal/suites/gost_suites.go:80-103` — suite IDs 0xC100/0xC101.
+- Tests and parity:
+  - `tlstree/tlstree_test.go` — KATs, windowing, aliasing, determinism, and
+    the D2 priming guard (this module).
+  - `gostcrypto-compat/parity/tlstree/tlstree_parity_test.go` — differential
+    tests and fuzz against the gogost reference.
+  - `github.com/bigbes/gostls` — TLS record protector, the production call site.
 - `CLAUDE.md` — "gogost/v7 library gotchas" (`TLSTree.DeriveCached` zero-key
   priming bug). `TODO.md` — the three divergences, none of which touch TLSTREE
   (D6).
