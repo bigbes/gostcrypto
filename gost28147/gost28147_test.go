@@ -130,6 +130,23 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSBoxAccessor pins that SBox() returns the S-box the cipher was built with.
+func TestSBoxAccessor(t *testing.T) {
+	t.Parallel()
+
+	key := mustHex(t, "00112233445566778899aabbccddeeff102132435465768798a9bacbdcedf0e1")
+
+	c := gost28147.NewCipher(key, gost28147.SboxCryptoProA)
+	if c.SBox() != gost28147.SboxCryptoProA {
+		t.Fatal("SBox() returned wrong S-box for CryptoProA cipher")
+	}
+
+	c2 := gost28147.NewCipher(key, gost28147.SboxTC26Z)
+	if c2.SBox() != gost28147.SboxTC26Z {
+		t.Fatal("SBox() returned wrong S-box for TC26Z cipher")
+	}
+}
+
 // TestSBoxesArePermutations sanity-checks each transcribed S-box row.
 func TestSBoxesArePermutations(t *testing.T) {
 	t.Parallel()
