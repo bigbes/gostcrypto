@@ -90,6 +90,7 @@ func TestExtractGOSTPubKeyBytes_RawWithOctetHeader(t *testing.T) {
 	// 0x04 0x3E (len=62) followed by 62 bytes => total 64. Under the old
 	// "OCTET STRING first" logic this parsed to a 62-byte key.
 	crafted := make([]byte, wantLen)
+
 	crafted[0] = 0x04
 	crafted[1] = 0x3E
 

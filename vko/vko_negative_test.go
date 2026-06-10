@@ -34,21 +34,9 @@ func testCurve256A(t *testing.T) *crv.Curve {
 	return c
 }
 
-// testCurve512A is the tc26-512-A cofactor-1 curve.
-func testCurve512A(t *testing.T) *crv.Curve {
-	t.Helper()
-
-	c, err := crv.CurveByOID("1.2.643.7.1.2.1.2.1")
-	if err != nil {
-		t.Fatalf("CurveByOID 512-A: %v", err)
-	}
-
-	return c
-}
-
 // ---------------------------------------------------------------------------
 // VKO-64 — negative-path tests for every error return.
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 // TestInputValidation_BadPrivLen pins errBadPrivLen for each variant.
 func TestInputValidation_BadPrivLen(t *testing.T) {
@@ -100,7 +88,8 @@ func TestInputValidation_ZeroPrivate(t *testing.T) {
 	}
 
 	// LE-encoded q (scalar that is zero mod q after reduction).
-	qBytes := c.Q.Bytes() // big-endian
+	qBytes := c.Q.Bytes() // big-endian.
+
 	qLE := make([]byte, 32)
 	for i, b := range qBytes {
 		qLE[32-1-i] = b
@@ -144,6 +133,7 @@ func TestInputValidation_OffCurvePub(t *testing.T) {
 	goodPub := mustDeriveQ(t, c, priv)
 	badPub := make([]byte, len(goodPub))
 	copy(badPub, goodPub)
+
 	badPub[len(badPub)-1] ^= 0xff
 
 	if _, err := vko.KEK2012256(c, priv, badPub, ukm); err == nil {
@@ -159,7 +149,7 @@ func TestInputValidation_OffCurvePub(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // VKO-62 — UKM reduction test: oversized UKM yields the same KEK as UKM mod fullOrder.
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 // TestUKMReduction_256A verifies that oversized UKM is reduced mod cofactor·q
 // and produces the same KEK as the reduced UKM passed directly.
@@ -268,10 +258,10 @@ func TestExistingKATsUnchanged(t *testing.T) {
 	}
 
 	priv := bytes.Repeat([]byte{0x11}, 32)
-	pub, _ := hexDecode(t, "5bdf2b87cb48d375feaed65e3c840548d0c3c497f1dbbba163a6a25077a927b8"+
+	pub := hexDecode(t, "5bdf2b87cb48d375feaed65e3c840548d0c3c497f1dbbba163a6a25077a927b8"+
 		"5b99b9f94433e8fe42aaf7190f5ae254695f65b52e111a129f1a65e3a62976ce")
 	ukm := []byte{1, 0, 0, 0, 0, 0, 0, 0}
-	want, _ := hexDecode(t, "0fb3a1f57deab23f4ac566ae07707169f1f5ec7fea2477625b58b259cf529453")
+	want := hexDecode(t, "0fb3a1f57deab23f4ac566ae07707169f1f5ec7fea2477625b58b259cf529453")
 
 	got, err := vko.KEK2012256(c, priv, pub, ukm)
 	if err != nil {
@@ -286,31 +276,31 @@ func TestExistingKATsUnchanged(t *testing.T) {
 // bigToLE encodes n as a little-endian byte slice of exactly size bytes.
 func bigToLE(n *big.Int, size int) []byte {
 	be := n.Bytes()
-	// Pad to size if needed.
-	if len(be) < size {
-		pad := make([]byte, size-len(be))
-		be = append(pad, be...)
-	}
 
-	out := make([]byte, len(be))
+	// Pad to size if needed: build the output directly as size bytes.
+	out := make([]byte, size)
 	for i, b := range be {
-		out[len(be)-1-i] = b
+		// be is big-endian; out[size-1-i] is the little-endian position.
+		pos := size - len(be) + i // position of be[i] in a size-wide BE slice.
+
+		out[size-1-pos] = b
 	}
 
 	return out
 }
 
-// hexDecode is a test helper decoding hex; fails the test on error.
-func hexDecode(t *testing.T, s string) ([]byte, error) {
+// hexDecode is a test helper decoding hex; calls t.Fatal on any error.
+func hexDecode(t *testing.T, s string) []byte {
 	t.Helper()
 
 	var b []byte
-	var err error
 
 	for i := 0; i < len(s); i += 2 {
 		var v byte
+
 		for _, c := range s[i : i+2] {
 			v <<= 4
+
 			switch {
 			case c >= '0' && c <= '9':
 				v |= byte(c - '0')
@@ -326,5 +316,5 @@ func hexDecode(t *testing.T, s string) ([]byte, error) {
 		b = append(b, v)
 	}
 
-	return b, err
+	return b
 }

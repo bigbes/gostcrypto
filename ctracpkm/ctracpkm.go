@@ -154,6 +154,7 @@ func (c *CTR) XORKeyStream(dst, src []byte) {
 	if len(dst) < len(src) {
 		panic(errShortDst)
 	}
+
 	if alias.InexactOverlap(dst[:len(src)], src) {
 		panic("ctracpkm: invalid buffer overlap")
 	}

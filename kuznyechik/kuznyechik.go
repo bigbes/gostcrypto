@@ -224,6 +224,7 @@ func buildTables() {
 
 			e[pos] = pi[byte(b)]
 			l(&e)
+
 			encTable[pos][b] = packEntry(&e)
 
 			// lInvTable: L⁻¹ of (raw byte b) at position pos. Used by Decrypt
@@ -232,6 +233,7 @@ func buildTables() {
 
 			li[pos] = byte(b)
 			lInv(&li)
+
 			lInvTable[pos][b] = packEntry(&li)
 		}
 	}
@@ -243,6 +245,7 @@ func slEncrypt(blk *[BlockSize]byte) {
 
 	for pos := range BlockSize {
 		t := &encTable[pos][blk[pos]]
+
 		hi ^= t.hi
 		lo ^= t.lo
 	}
@@ -257,6 +260,7 @@ func lInvFast(blk *[BlockSize]byte) {
 
 	for pos := range BlockSize {
 		t := &lInvTable[pos][blk[pos]]
+
 		hi ^= t.hi
 		lo ^= t.lo
 	}
@@ -264,7 +268,6 @@ func lInvFast(blk *[BlockSize]byte) {
 	binary.BigEndian.PutUint64(blk[0:8], hi)
 	binary.BigEndian.PutUint64(blk[8:16], lo)
 }
-
 
 // Cipher is a Kuznyechik block cipher instance holding the 10 expanded round
 // keys.

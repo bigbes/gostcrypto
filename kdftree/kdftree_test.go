@@ -68,7 +68,7 @@ func TestKDFTree256_KAT1_PerIteration(t *testing.T) {
 // Source: RFC 7836 Appendix B, example 9 (rfc7836.txt:1499-1526), which is the
 // single-block KDF_GOSTR3411_2012_256 = KDFTree256 with R=1, L=256.
 // The HMAC message is: 01|26bdb878|00|af21434145656378|0100
-// Expected output: a1aa5f7de402d7b3d323f2991c8d4534013137010a83754fd0af6d7cd4922ed9
+// Expected output: a1aa5f7de402d7b3d323f2991c8d4534013137010a83754fd0af6d7cd4922ed9.
 func TestKDFTree256_KAT2_32B(t *testing.T) {
 	t.Parallel()
 
@@ -76,7 +76,7 @@ func TestKDFTree256_KAT2_32B(t *testing.T) {
 	label := mustHex(t, "26BDB878")
 	seed := mustHex(t, "AF21434145656378")
 	// RFC 7836 Appendix B example 9 (rfc7836.txt:1499-1526):
-	// KDF_GOSTR3411_2012_256(K_in, label, seed) = HMAC(K, 01|label|00|seed|0100)
+	// KDF_GOSTR3411_2012_256(K_in, label, seed) = HMAC(K, 01|label|00|seed|0100).
 	want := mustHex(t, "a1aa5f7de402d7b3d323f2991c8d4534013137010a83754fd0af6d7cd4922ed9")
 
 	got := kdftree.KDFTree256(key, label, seed, 1, 32)
@@ -125,7 +125,7 @@ func TestKDFTree256_Truncation(t *testing.T) {
 	// Content check via independent oracle (KDFT-32): manual HMAC with L=320 bits
 	// (outLen=40 → L_b = 0x01 0x40, which is 2 bytes with no leading zeros).
 	// L_b for 320 bits = 0x140 = two bytes 0x01, 0x40.
-	lRepr40 := []byte{0x01, 0x40} // 320 bits big-endian, no leading zeros
+	lRepr40 := []byte{0x01, 0x40} // 320 bits big-endian, no leading zeros.
 	k1 := oracleHMAC(key, []byte{0x01}, label, seed, lRepr40)
 	k2 := oracleHMAC(key, []byte{0x02}, label, seed, lRepr40)
 	wantOracle := append(k1, k2...)[:40]
@@ -141,7 +141,7 @@ func TestKDFTree256_Truncation(t *testing.T) {
 		t.Fatalf("len(got16) = %d, want 16", len(got16))
 	}
 
-	lRepr16 := []byte{0x80} // 128 bits = 0x80 (1 byte; no leading zeros)
+	lRepr16 := []byte{0x80} // 128 bits = 0x80 (1 byte; no leading zeros).
 	k1_16 := oracleHMAC(key, []byte{0x01}, label, seed, lRepr16)
 	wantOracle16 := k1_16[:16]
 
@@ -187,7 +187,6 @@ func TestKDFTree256_CounterWidth(t *testing.T) {
 	lRepr64 := []byte{0x02, 0x00}
 
 	for r := 2; r <= 4; r++ {
-		r := r
 		t.Run(func() string {
 			switch r {
 			case 2:
@@ -208,8 +207,11 @@ func TestKDFTree256_CounterWidth(t *testing.T) {
 			// Build counter bytes [i]_b: low r bytes of i, big-endian.
 			// i=1: 00..0001 (r bytes), i=2: 00..0002 (r bytes).
 			counter1 := make([]byte, r)
+
 			counter1[r-1] = 0x01
+
 			counter2 := make([]byte, r)
+
 			counter2[r-1] = 0x02
 
 			k1 := oracleHMAC(key, counter1, label, seed, lRepr64)

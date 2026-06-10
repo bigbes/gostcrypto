@@ -91,13 +91,13 @@ func v2Message() []byte {
 func TestSeqMACBlock_GuideStep1KAT(t *testing.T) {
 	t.Parallel()
 
-	key := imitKey // "0123456789abcdef0123456789abcdef" ASCII, 32 bytes
+	key := imitKey // "0123456789abcdef0123456789abcdef" ASCII, 32 bytes.
 	block := []byte("12345670")
 
 	cases := []struct {
 		name string
 		sbox gost28147.SBox
-		want string // raw 8-byte chaining state, hex
+		want string // raw 8-byte chaining state, hex.
 	}{
 		// guide §"Re-implementation checklist" step 1; verified 2026-06-10.
 		{"CryptoPro-A", gost28147.SboxCryptoProA, "832e9da41b6e6d6b"},
@@ -148,7 +148,7 @@ func TestSeqMACBlock_StreamingMatchesIMIT(t *testing.T) {
 	cases := []struct {
 		name string
 		msg  []byte
-		want string // 4-byte TLS-truncated IMIT, hex (matches TestIMIT_GuideVectors)
+		want string // 4-byte TLS-truncated IMIT, hex (matches TestIMIT_GuideVectors).
 	}{
 		// All four V3/V1 vectors. Sources: tmp/engine/test/02-mac.t:158-173
 		// (key "0123456789abcdef" x 2 ASCII; message = "12345670" x 128).
@@ -166,7 +166,8 @@ func TestSeqMACBlock_StreamingMatchesIMIT(t *testing.T) {
 
 			// Streaming driver mirroring guide §2.1 buffering and gostls
 			// chaining semantics.
-			var prev [blockSize]byte // chaining state, starts all-zero
+			var prev [blockSize]byte // chaining state, starts all-zero.
+
 			count := 0
 
 			processBlock := func(blk [blockSize]byte) {
@@ -177,8 +178,10 @@ func TestSeqMACBlock_StreamingMatchesIMIT(t *testing.T) {
 				for i := range blockSize {
 					xored[i] = prev[i] ^ blk[i]
 				}
+
 				result := SeqMACBlock(key, sbox, xored[:])
 				copy(prev[:], result)
+
 				count = count%meshPeriod + blockSize
 			}
 
@@ -189,15 +192,18 @@ func TestSeqMACBlock_StreamingMatchesIMIT(t *testing.T) {
 				var blk [blockSize]byte
 				copy(blk[:], msg[i:i+blockSize])
 				processBlock(blk)
+
 				i += blockSize
 			}
 
 			// Remaining bytes (1–8) form the deferred trailing block.
 			rem := msg[i:]
+
 			var blk [blockSize]byte
-			copy(blk[:], rem) // zero-padded for partial blocks
+			copy(blk[:], rem) // zero-padded for partial blocks.
 
 			dataCountWasZero := (count == 0)
+
 			processBlock(blk)
 
 			// §2.1 rule 3: total length 1–8, append trailing all-zero block.
@@ -235,7 +241,7 @@ func TestIMIT_TC26Z_1024B_Meshing(t *testing.T) {
 	t.Parallel()
 
 	key := imitKey
-	msg := []byte(strings.Repeat("12345670", 128)) // 1024 bytes
+	msg := []byte(strings.Repeat("12345670", 128)) // 1024 bytes.
 
 	// Full 8-byte tag via internal imit() with tc26-Z S-box.
 	// Source: tmp/engine/test/02-mac.t:190-194 (gost-mac-12, testdata.dat).

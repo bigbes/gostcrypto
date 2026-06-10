@@ -44,6 +44,10 @@ const (
 
 	// doublingXCoeff is the constant 3 in the doubling slope (3·x² + a)/(2·y).
 	doublingXCoeff = 3
+
+	// cofactor4 is the cofactor for the twisted-Edwards-derived TC26 curves
+	// (tc26-256-A and tc26-512-C). All other registered sets have Cofactor 1.
+	cofactor4 = 4
 )
 
 // Curve is a GOST R 34.10 short-Weierstrass curve parameter set:
@@ -178,7 +182,7 @@ func curveTc26256A() *Curve {
 		X:        hexInt("91E38443A5E82C0D880923425712B2BB658B9196932E02C78B2582FE742DAA28"),
 		Y:        hexInt("32879423AB1A0375895786C4BB46E9565FDE0B5344766740AF268ADB32322E5C"),
 		Name:     "id-tc26-gost-3410-12-256-paramSetA",
-		Cofactor: 4,
+		Cofactor: cofactor4,
 	}
 }
 
@@ -241,7 +245,7 @@ func curveTc26512C() *Curve {
 		Y: hexInt("F5CE40D95B5EB899ABBCCFF5911CB8577939804D6527378B8C108C3D2090FF9B" +
 			"E18E2D33E3021ED2EF32D85822423B6304F726AA854BAE07D0396E9A9ADDC40F"),
 		Name:     "id-tc26-gost-3410-12-512-paramSetC",
-		Cofactor: 4,
+		Cofactor: cofactor4,
 	}
 }
 

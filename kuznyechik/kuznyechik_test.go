@@ -215,14 +215,14 @@ func TestNewCipherPanicsOnBadKey(t *testing.T) {
 		NewCipher(make([]byte, n))
 	}
 
-	mustPanic("short", 16)  // under 32 bytes.
+	mustPanic("short", 16)    // under 32 bytes.
 	mustPanic("oversize", 33) // over 32 bytes: len(key) != keySize rejects this too.
 }
 
 // TestEncryptDecryptInPlace pins full-overlap (dst == src) aliasing for the §A.1
 // vector: cipher.Block permits dst and src to overlap entirely, and in-module
 // omac.go relies on Encrypt(b, b). A future table tweak writing dst incrementally
-// must not break this. (KUZN-46)
+// must not break this. (KUZN-46).
 func TestEncryptDecryptInPlace(t *testing.T) {
 	t.Parallel()
 

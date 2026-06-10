@@ -31,6 +31,7 @@ func FuzzSplitInvariance(f *testing.F) {
 		// Normalize key and IV to the required sizes.
 		key := make([]byte, gost28147.KeySize)
 		iv := make([]byte, gost28147.BlockSize)
+
 		copy(key, rawKey)
 		copy(iv, rawIV)
 
@@ -56,14 +57,18 @@ func FuzzSplitInvariance(f *testing.F) {
 		got := make([]byte, n)
 		s := gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv)
 		off := 0
+
 		step := chunkSeed
 		for off < n {
 			chunk := 1 + int(step%17)
 			if off+chunk > n {
 				chunk = n - off
 			}
+
 			s.XORKeyStream(got[off:off+chunk], pt[off:off+chunk])
+
 			off += chunk
+
 			step = step*31 + 7
 		}
 

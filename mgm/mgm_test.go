@@ -285,6 +285,7 @@ func TestMGM_RFC9058_Example2(t *testing.T) {
 
 			// Tamper: flip last tag byte → must fail.
 			bad := append([]byte{}, got...)
+
 			bad[len(bad)-1] ^= 0x01
 
 			if _, err := aead.Open(nil, nonce, bad, aad); err == nil {
@@ -401,6 +402,7 @@ func TestMGM_TruncatedTags(t *testing.T) {
 
 			// Tamper: flip last tag byte → must fail.
 			bad := append([]byte{}, truncOut...)
+
 			bad[len(bad)-1] ^= 0x01
 
 			if _, err := truncAEAD.Open(nil, tc.nonce, bad, tc.aad); err == nil {
@@ -424,7 +426,10 @@ func TestMGM_InPlaceAliasing(t *testing.T) {
 	key := unhex(t, "8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef")
 	nonce := unhex(t, "1122334455667700ffeeddccbbaa9988")
 	aad := unhex(t, "0202020202020202010101010101010104040404040404040303030303030303ea0505050505050505")
-	plain := unhex(t, "1122334455667700ffeeddccbbaa998800112233445566778899aabbcceeff0a112233445566778899aabbcceeff0a002233445566778899aabbcceeff0a0011aabbcc")
+	plain := unhex(t,
+		"1122334455667700ffeeddccbbaa998800112233445566778899aabbcceeff0a"+
+			"112233445566778899aabbcceeff0a002233445566778899aabbcceeff0a0011aabbcc",
+	)
 
 	aead, err := mgm.NewMGM(kuznyechik.NewCipher(key), 16)
 	if err != nil {
@@ -436,7 +441,9 @@ func TestMGM_InPlaceAliasing(t *testing.T) {
 
 	// In-place: dst shares the same backing array as plain, starting before it.
 	inPlace := make([]byte, 0, len(plain)+16)
+
 	inPlace = append(inPlace, plain...)
+
 	got := aead.Seal(inPlace[:0], nonce, inPlace[:len(plain)], aad)
 
 	if !bytes.Equal(got, want) {
@@ -453,8 +460,11 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 		unhexF("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
 		unhexF("1122334455667700ffeeddccbbaa9988"),
 		unhexF("0202020202020202010101010101010104040404040404040303030303030303ea0505050505050505"),
-		unhexF("1122334455667700ffeeddccbbaa998800112233445566778899aabbcceeff0a112233445566778899aabbcceeff0a002233445566778899aabbcceeff0a0011aabbcc"),
-		byte(0), // sel=0: Kuznyechik, full tag
+		unhexF(
+			"1122334455667700ffeeddccbbaa998800112233445566778899aabbcceeff0a"+
+				"112233445566778899aabbcceeff0a002233445566778899aabbcceeff0a0011aabbcc",
+		),
+		byte(0), // sel=0: Kuznyechik, full tag.
 	)
 	// Seed from Example 1 Magma.
 	f.Add(
@@ -462,7 +472,7 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 		unhexF("12def06b3c130a59"),
 		unhexF("0101010101010101020202020202020203030303030303030404040404040404050505050505050505"),
 		unhexF("ffeeddccbbaa998811223344556677008899aabbcceeff0a0011223344556677"),
-		byte(1), // sel=1: Magma, full tag
+		byte(1), // sel=1: Magma, full tag.
 	)
 
 	f.Fuzz(func(t *testing.T, key, nonce, aad, plain []byte, sel byte) {
@@ -473,6 +483,7 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 
 		if sel&1 == 0 {
 			blockSz = 16
+
 			if len(key) < 32 {
 				key = append(key, make([]byte, 32-len(key))...)
 			}
@@ -481,6 +492,7 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 			newBlk = func(k []byte) cipher.Block { return kuznyechik.NewCipher(k) }
 		} else {
 			blockSz = 8
+
 			if len(key) < 32 {
 				key = append(key, make([]byte, 32-len(key))...)
 			}
@@ -498,6 +510,7 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 		}
 
 		nonce = nonce[:blockSz]
+
 		nonce[0] &= 0x7f
 
 		// At least one of aad/plain must be non-empty.
@@ -528,6 +541,7 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 		// Mutate one byte in ct||tag → Open must fail.
 		mutIdx := int(sel) % len(ct)
 		bad := append([]byte{}, ct...)
+
 		bad[mutIdx] ^= 0x01
 
 		if _, err := aead.Open(nil, nonce, bad, aad); err == nil {

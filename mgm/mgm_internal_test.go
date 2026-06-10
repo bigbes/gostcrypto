@@ -64,7 +64,7 @@ func TestValidateLens(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const maxMagmaBytes = (1 << 29) - 1 // per-field cap
+	const maxMagmaBytes = (1 << 29) - 1 // per-field cap.
 
 	// Both fields at the per-field cap: combined bit-length = 2*(2^29-1)*8 = 2^33-16 bits > 2^32.
 	if m8.validateLens(maxMagmaBytes, maxMagmaBytes) {

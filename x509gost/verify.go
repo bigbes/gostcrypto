@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"slices"
 	"time"
 
 	gost "github.com/bigbes/gostcrypto"
@@ -24,9 +25,6 @@ var (
 	errGOSTSigVerifyFailed = errors.New("x509gost: GOST signature verification failed")
 	errLeafEKUMismatch     = errors.New(
 		"x509gost: leaf does not satisfy the requested extended key usages",
-	)
-	errIssuerNotCA = errors.New(
-		"x509gost: issuer is not a CA (BasicConstraints.IsCA=false or missing KeyUsageCertSign)",
 	)
 )
 
@@ -193,10 +191,8 @@ func leafSatisfiesKeyUsages(leaf *x509.Certificate, requested []x509.ExtKeyUsage
 			return true
 		}
 
-		for _, have := range leaf.ExtKeyUsage {
-			if have == want {
-				return true
-			}
+		if slices.Contains(leaf.ExtKeyUsage, want) {
+			return true
 		}
 	}
 

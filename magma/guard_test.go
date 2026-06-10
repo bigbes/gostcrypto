@@ -27,12 +27,13 @@ func mustHexG(t *testing.T, s string) []byte {
 }
 
 // TestNewCipherPanicsOnBadKey pins the documented panic contract:
-// NewCipher panics if the key is not exactly KeySize (32) bytes.  (MAGM-50)
+// NewCipher panics if the key is not exactly KeySize (32) bytes.  (MAGM-50).
 func TestNewCipherPanicsOnBadKey(t *testing.T) {
 	t.Parallel()
 
 	mustPanic := func(name string, n int) {
 		t.Helper()
+
 		defer func() {
 			if recover() == nil {
 				t.Errorf("%s: expected panic on %d-byte key", name, n)
@@ -48,7 +49,7 @@ func TestNewCipherPanicsOnBadKey(t *testing.T) {
 }
 
 // TestEncryptDecryptPanicsOnShortBuffer pins the documented panics:
-// Encrypt/Decrypt panic if src or dst is shorter than BlockSize.  (MAGM-50)
+// Encrypt/Decrypt panic if src or dst is shorter than BlockSize.  (MAGM-50).
 func TestEncryptDecryptPanicsOnShortBuffer(t *testing.T) {
 	t.Parallel()
 
@@ -58,6 +59,7 @@ func TestEncryptDecryptPanicsOnShortBuffer(t *testing.T) {
 
 	mustPanic := func(name string, f func()) {
 		t.Helper()
+
 		defer func() {
 			if recover() == nil {
 				t.Errorf("%s: expected panic on short buffer", name)
@@ -78,7 +80,7 @@ func TestEncryptDecryptPanicsOnShortBuffer(t *testing.T) {
 // tmp[8] buffer so in-place operation is safe, but no magma test previously
 // pinned it — a future optimisation that writes dst before consuming src
 // would silently break every composing mode (CTR/OMAC/MGM) that calls
-// Encrypt(b, b).  (MAGM-50)
+// Encrypt(b, b).  (MAGM-50).
 func TestEncryptDecryptInPlace(t *testing.T) {
 	t.Parallel()
 
@@ -89,7 +91,7 @@ func TestEncryptDecryptInPlace(t *testing.T) {
 
 	c := magma.NewCipher(key)
 
-	// in-place encrypt: dst == src
+	// in-place encrypt: dst == src.
 	enc := append([]byte(nil), pt...)
 	c.Encrypt(enc, enc)
 
@@ -97,7 +99,7 @@ func TestEncryptDecryptInPlace(t *testing.T) {
 		t.Fatalf("in-place Encrypt: got %x want %x", enc, want)
 	}
 
-	// in-place decrypt: dst == src, must recover plaintext
+	// in-place decrypt: dst == src, must recover plaintext.
 	dec := append([]byte(nil), want...)
 	c.Decrypt(dec, dec)
 

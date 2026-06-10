@@ -16,5 +16,6 @@ func InexactOverlap(x, y []byte) bool {
 	if len(x) == 0 || len(y) == 0 || &x[0] == &y[0] {
 		return false
 	}
+
 	return AnyOverlap(x, y)
 }

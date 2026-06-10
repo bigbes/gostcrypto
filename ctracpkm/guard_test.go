@@ -70,7 +70,7 @@ func TestNewCTRACPKM_RejectsNonDividingBlockSize(t *testing.T) {
 
 	// stubBlock12 is a cipher.Block with BlockSize() == 12.
 	stub := &stubBlock{blockSize: 12}
-	newBlock := func(k []byte) cipher.Block { return stub }
+	newBlock := func(_ []byte) cipher.Block { return stub }
 
 	// sectionSize=24 is a multiple of 12, so that check passes; only the
 	// acpkmKeySize%bs != 0 check (32%12 != 0) should fire.

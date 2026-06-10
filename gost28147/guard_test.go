@@ -25,13 +25,16 @@ func TestNewCipher_PanicOnBadKey(t *testing.T) {
 
 	for _, badLen := range []int{0, 1, 16, 31, 33, 64} {
 		n := badLen
+
 		t.Run("", func(t *testing.T) {
 			t.Parallel()
+
 			defer func() {
 				if r := recover(); r == nil {
 					t.Fatalf("NewCipher with key len %d: expected panic, got none", n)
 				}
 			}()
+
 			gost28147.NewCipher(make([]byte, n), gost28147.SboxCryptoProA)
 		})
 	}
@@ -46,21 +49,25 @@ func TestEncrypt_PanicOnShortBuffer(t *testing.T) {
 
 	t.Run("short-src", func(t *testing.T) {
 		t.Parallel()
+
 		defer func() {
 			if r := recover(); r == nil {
 				t.Fatal("Encrypt with short src: expected panic, got none")
 			}
 		}()
+
 		c.Encrypt(make([]byte, gost28147.BlockSize), make([]byte, gost28147.BlockSize-1))
 	})
 
 	t.Run("short-dst", func(t *testing.T) {
 		t.Parallel()
+
 		defer func() {
 			if r := recover(); r == nil {
 				t.Fatal("Encrypt with short dst: expected panic, got none")
 			}
 		}()
+
 		c.Encrypt(make([]byte, gost28147.BlockSize-1), make([]byte, gost28147.BlockSize))
 	})
 }
@@ -74,21 +81,25 @@ func TestDecrypt_PanicOnShortBuffer(t *testing.T) {
 
 	t.Run("short-src", func(t *testing.T) {
 		t.Parallel()
+
 		defer func() {
 			if r := recover(); r == nil {
 				t.Fatal("Decrypt with short src: expected panic, got none")
 			}
 		}()
+
 		c.Decrypt(make([]byte, gost28147.BlockSize), make([]byte, gost28147.BlockSize-1))
 	})
 
 	t.Run("short-dst", func(t *testing.T) {
 		t.Parallel()
+
 		defer func() {
 			if r := recover(); r == nil {
 				t.Fatal("Decrypt with short dst: expected panic, got none")
 			}
 		}()
+
 		c.Decrypt(make([]byte, gost28147.BlockSize-1), make([]byte, gost28147.BlockSize))
 	})
 }
@@ -104,7 +115,7 @@ func TestEncryptDecrypt_InPlace(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		sbox gost28147.SBox
-		// plaintext from TestECB_KAT V1/CryptoProA and V1b/TC26Z
+		// plaintext from TestECB_KAT V1/CryptoProA and V1b/TC26Z.
 		pt string
 	}{
 		{name: "CryptoProA", sbox: gost28147.SboxCryptoProA, pt: "1020304050607080"},
@@ -124,6 +135,7 @@ func TestEncryptDecrypt_InPlace(t *testing.T) {
 			buf := make([]byte, gost28147.BlockSize)
 			copy(buf, pt)
 			c.Encrypt(buf, buf)
+
 			for i, b := range buf {
 				if b != ctRef[i] {
 					t.Fatalf("Encrypt in-place: byte %d got %02x want %02x", i, b, ctRef[i])
@@ -136,6 +148,7 @@ func TestEncryptDecrypt_InPlace(t *testing.T) {
 
 			// In-place decrypt: buf now holds ciphertext.
 			c.Decrypt(buf, buf)
+
 			for i, b := range buf {
 				if b != ptRef[i] {
 					t.Fatalf("Decrypt in-place: byte %d got %02x want %02x", i, b, ptRef[i])

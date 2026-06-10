@@ -150,13 +150,14 @@ func TestPubKeyRaw_ByteOrder_LE_X_then_Y(t *testing.T) {
 	a := mustHex(t, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD94")
 	b := big.NewInt(166)
 
-	// y^2 mod p
+	// y^2 mod p.
 	lhs := new(big.Int).Mul(y, y)
 	lhs.Mod(lhs, p)
 
-	// x^3 + a*x + b mod p
+	// x^3 + a*x + b mod p.
 	rhs := new(big.Int).Mul(x, x)
 	rhs.Mul(rhs, x)
+
 	ax := new(big.Int).Mul(a, x)
 	rhs.Add(rhs, ax)
 	rhs.Add(rhs, b)

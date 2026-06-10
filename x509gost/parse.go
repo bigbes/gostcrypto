@@ -25,6 +25,9 @@ var (
 type GOSTAlgorithm int
 
 const (
+	// pubKeyCoords is the number of coordinates in a GOST public key (X and Y).
+	pubKeyCoords = 2
+
 	// AlgoR341001 is GOST R 34.10-2001.
 	AlgoR341001 GOSTAlgorithm = iota + 1
 	// AlgoR341012_256 is GOST R 34.10-2012 with 256-bit key.
@@ -247,7 +250,7 @@ func ParseCertificate(der []byte) (*Certificate, error) {
 		return nil, fmt.Errorf("x509gost: resolve curve OID %v: %w", curveOID, err)
 	}
 
-	wantPubLen := 2 * curve.PointSize()
+	wantPubLen := pubKeyCoords * curve.PointSize()
 
 	// Extract raw public key bytes from the BIT STRING.
 	// Per RFC 4491 §2.1 the BIT STRING value is an OCTET STRING containing

@@ -48,6 +48,11 @@ const (
 	// lengthFieldShiftAdj is the -3 in 2^(n/2-3)-1: a field's BIT length is
 	// stored in n/2 bits, so its BYTE length caps at 2^(n/2-3)-1.
 	lengthFieldShiftAdj = 3
+
+	// uint64Bits is the number of bits in a uint64 value. When halfBits (n/2)
+	// reaches this value 2^n/2 would overflow uint64, so the combined-length
+	// bound is always satisfied by the uint64-overflow check alone.
+	uint64Bits = 64
 )
 
 // errBlockSize and errTagSize are the static construction errors returned by
@@ -214,7 +219,7 @@ func (m *MGM) maxFieldLen() int {
 	const maxInt = int(^uint(0) >> 1)
 
 	halfBits := m.blockSize * bitsPerByte / halfDivisor // n/2 bits per length field.
-	shift := halfBits - lengthFieldShiftAdj             // n/2 - 3
+	shift := halfBits - lengthFieldShiftAdj             // n/2 - 3.
 
 	if shift >= bits.UintSize-1 {
 		// The shift would not fit a signed platform int; cap is effectively ∞.
@@ -229,18 +234,18 @@ func (m *MGM) maxFieldLen() int {
 // Arithmetic is done in uint64 to avoid overflow on 32-bit platforms.
 // Returns true if the combined bit-length is within bounds.
 func (m *MGM) validateLens(aLen, pLen int) bool {
-	halfBits := uint64(m.blockSize) * bitsPerByte / halfDivisor // n/2
+	halfBits := uint64(m.blockSize) * bitsPerByte / halfDivisor // n/2.
 	aBits := uint64(aLen) * bitsPerByte
 	pBits := uint64(pLen) * bitsPerByte
 
 	sum := aBits + pBits
 	// Check for uint64 overflow (sum wraps); also check against the bound.
 	// 2^(n/2) bits: for n=64 that is 2^32; for n=128 that is 2^64 (overflows uint64 → 0).
-	if aBits > sum { // overflow
+	if aBits > sum { // overflow.
 		return false
 	}
 
-	if halfBits >= 64 {
+	if halfBits >= uint64Bits {
 		// 2^64 doesn't fit uint64; the only invalid case is overflow (already checked).
 		return true
 	}

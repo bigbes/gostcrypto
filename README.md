@@ -92,5 +92,6 @@ BSD-2-Clause
 - `<package>/<primitive>.md` — per-primitive clean-room re-implementation
   guide, next to the code it specifies (see the Packages table above).
 - `gost3410curves/SECURITY.md` — constant-time status of `ScalarMult`.
+- `kuznyechik/SECURITY.md` — cache-timing considerations for the table-driven S-L rounds.
 - `TODO.md` — known gogost/gost-engine vector divergences (S-box row order,
   R 34.11-94 empty-input finalization, CryptoPro key meshing).

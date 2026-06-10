@@ -207,6 +207,7 @@ func TestKEG2012_256_BadKeys(t *testing.T) {
 	// An off-curve public key: flip one byte of a valid key so the point no
 	// longer satisfies the curve equation.
 	offCurvePub := append([]byte(nil), goodPub...)
+
 	offCurvePub[0] ^= 0xff
 
 	cases := []struct {

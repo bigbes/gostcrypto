@@ -174,6 +174,7 @@ func agreementRaw(c *gost3410curves.Curve, d, ukm *big.Int, q gost3410curves.Poi
 	u := new(big.Int).Mul(ukm, cof)
 	fullOrder := new(big.Int).Mul(cof, c.Q)
 	u.Mod(u, fullOrder)
+
 	if u.Sign() == 0 {
 		// u·K1 would be the identity; same failure the post-ScalarMult
 		// IsInfinity check reports.

@@ -18,15 +18,16 @@ import (
 // does not depend on an unexported helper from gost3410sign_test.go.
 func hexDecodeStringLocal(s string) ([]byte, error) { return hex.DecodeString(s) }
 
-// katFieldsR returns the canonical 256-bit KAT components (all byte slices are
-// freshly decoded on every call so callers can mutate freely).
+// katFieldsR returns the canonical 256-bit KAT components (dig, pub, sig —
+// all byte slices are freshly decoded on every call so callers can mutate freely).
 // (Distinct name from katFields to avoid conflict if the main test file adds one.)
-func katFieldsR(t *testing.T) (prv, dig, pub, sig []byte) {
+func katFieldsR(t *testing.T) (dig, pub, sig []byte) {
 	t.Helper()
-	prv = mustHex(t, katPrvLE)
+
 	dig = mustHex(t, katDigBE)
 	pub = append(mustHex(t, katPubX), mustHex(t, katPubY)...)
 	sig = mustHex(t, katSigSR)
+
 	return
 }
 
@@ -34,7 +35,7 @@ func katFieldsR(t *testing.T) (prv, dig, pub, sig []byte) {
 func cloneBytes(b []byte) []byte { return append([]byte(nil), b...) }
 
 // q256 is the subgroup order for the 256-bit test curve (testParamSetCurve).
-// q = 0x8000000000000000000000000000000150FE8A1892976154C59CFC193ACCF5B3
+// q = 0x8000000000000000000000000000000150FE8A1892976154C59CFC193ACCF5B3.
 var q256, _ = new(big.Int).SetString(
 	"8000000000000000000000000000000150FE8A1892976154C59CFC193ACCF5B3", 16,
 )
@@ -45,20 +46,23 @@ func bigToBeFixed(n *big.Int, size int) []byte {
 	if len(b) >= size {
 		return b[len(b)-size:]
 	}
+
 	out := make([]byte, size)
 	copy(out[size-len(b):], b)
+
 	return out
 }
 
-// ─── GOST-25: Rejection paths ──────────────────────────────────────────────
+// ─── GOST-25: Rejection paths ──────────────────────────────────────────────.
 
 // TestVerify_RejectsMalformedLengths checks that VerifyDigest returns false
 // (no panic) when the signature or public-key byte slice has the wrong length.
 // Enumerated from gost3410sign.go:127 (length gate).
 func TestVerify_RejectsMalformedLengths(t *testing.T) {
 	t.Parallel()
+
 	c := testParamSetCurve()
-	_, dig, pub, sig := katFieldsR(t)
+	dig, pub, sig := katFieldsR(t)
 
 	cases := []struct {
 		name   string
@@ -76,9 +80,9 @@ func TestVerify_RejectsMalformedLengths(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			if gost3410sign.VerifyDigest(c, tc.pubRaw, dig, tc.sigRaw) {
 				t.Fatalf("%s: expected false, got true", tc.name)
 			}
@@ -90,22 +94,25 @@ func TestVerify_RejectsMalformedLengths(t *testing.T) {
 // r or s is 0 or ≥ q (§6.2 step-1 strict range gate, gost3410sign.go:136).
 func TestVerify_RejectsOutOfRangeRS(t *testing.T) {
 	t.Parallel()
+
 	c := testParamSetCurve()
-	_, dig, pub, sig := katFieldsR(t)
+	dig, pub, sig := katFieldsR(t)
 
 	ps := c.PointSize() // 32 bytes for the 256-bit test curve.
 	qBytes := bigToBeFixed(q256, ps)
 
 	// Build a signature with s = 0 (first half zeroed).
 	sigSZero := cloneBytes(sig)
-	for i := 0; i < ps; i++ {
+	for i := range ps {
 		sigSZero[i] = 0x00
 	}
+
 	// Build a signature with r = 0 (second half zeroed).
 	sigRZero := cloneBytes(sig)
 	for i := ps; i < 2*ps; i++ {
 		sigRZero[i] = 0x00
 	}
+
 	// Build a signature with s = q (s-half set to BE(q)).
 	sigSEqQ := cloneBytes(sig)
 	copy(sigSEqQ[:ps], qBytes)
@@ -131,9 +138,9 @@ func TestVerify_RejectsOutOfRangeRS(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			if gost3410sign.VerifyDigest(c, pub, dig, tc.s) {
 				t.Fatalf("%s: expected false (out-of-range r/s), got true", tc.name)
 			}
@@ -146,8 +153,9 @@ func TestVerify_RejectsOutOfRangeRS(t *testing.T) {
 // Exercises gost3410sign.go:147 (IsOnCurve / infinity gate).
 func TestVerify_RejectsOffCurvePub(t *testing.T) {
 	t.Parallel()
+
 	c := testParamSetCurve()
-	_, dig, pub, sig := katFieldsR(t)
+	dig, pub, sig := katFieldsR(t)
 
 	// all-zero pub: (0,0) is not on the curve.
 	allZero := make([]byte, len(pub))
@@ -155,6 +163,7 @@ func TestVerify_RejectsOffCurvePub(t *testing.T) {
 	// one-byte-flipped pub (first byte of X coordinate, LE) — almost certainly
 	// not on the curve.
 	flipped := cloneBytes(pub)
+
 	flipped[0] ^= 0x01
 
 	cases := []struct {
@@ -166,9 +175,9 @@ func TestVerify_RejectsOffCurvePub(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			if gost3410sign.VerifyDigest(c, tc.p, dig, sig) {
 				t.Fatalf("%s: expected false (off-curve pub), got true", tc.name)
 			}
@@ -182,8 +191,9 @@ func TestVerify_RejectsOffCurvePub(t *testing.T) {
 //   - nonce k = BE(q) (k ≡ 0 mod q, gost3410sign.go:78)
 func TestSign_RejectsDegenerateInputs(t *testing.T) {
 	t.Parallel()
+
 	c := testParamSetCurve()
-	_, dig, _, _ := katFieldsR(t)
+	dig, _, _ := katFieldsR(t)
 	validK := mustHex(t, katNonce)
 	validPrv := mustHex(t, katPrvLE)
 
@@ -211,9 +221,9 @@ func TestSign_RejectsDegenerateInputs(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			got := gost3410sign.SignDigest(c, tc.prv, dig, tc.k)
 			if got != nil {
 				t.Fatalf("%s: expected nil from SignDigest, got sig %x", tc.name, got)
@@ -229,6 +239,7 @@ func TestSign_RejectsDegenerateInputs(t *testing.T) {
 // This pins the branches at gost3410sign.go:69 (sign) and :155 (verify).
 func TestEZeroSubstitution(t *testing.T) {
 	t.Parallel()
+
 	c := testParamSetCurve()
 	k := mustHex(t, katNonce)
 	prv := mustHex(t, katPrvLE)
@@ -244,6 +255,7 @@ func TestEZeroSubstitution(t *testing.T) {
 	if sig1 == nil {
 		t.Fatal("SignDigest(digest=q) returned nil")
 	}
+
 	sig2 := gost3410sign.SignDigest(c, prv, digEmpty, k)
 	if sig2 == nil {
 		t.Fatal("SignDigest(digest=empty) returned nil")
@@ -254,6 +266,7 @@ func TestEZeroSubstitution(t *testing.T) {
 	if len(sig1) != len(sig2) {
 		t.Fatalf("sig length mismatch: %d vs %d", len(sig1), len(sig2))
 	}
+
 	for i := range sig1 {
 		if sig1[i] != sig2[i] {
 			t.Fatalf("signatures differ at byte %d: %02x vs %02x", i, sig1[i], sig2[i])
@@ -264,6 +277,7 @@ func TestEZeroSubstitution(t *testing.T) {
 	if !gost3410sign.VerifyDigest(c, pub, digQ, sig1) {
 		t.Fatal("VerifyDigest(digest=q, sig1) returned false")
 	}
+
 	if !gost3410sign.VerifyDigest(c, pub, digEmpty, sig1) {
 		t.Fatal("VerifyDigest(digest=empty, sig1) returned false")
 	}
@@ -274,14 +288,16 @@ func TestEZeroSubstitution(t *testing.T) {
 // 64 iterations for the 256-bit KAT signature (2×32 bytes).
 func TestBitFlipSweep(t *testing.T) {
 	t.Parallel()
+
 	c := testParamSetCurve()
-	_, dig, pub, sig := katFieldsR(t)
+	dig, pub, sig := katFieldsR(t)
 
 	for i := range sig {
-		i := i
 		t.Run("", func(t *testing.T) {
 			t.Parallel()
+
 			bad := cloneBytes(sig)
+
 			bad[i] ^= 0xFF
 			if gost3410sign.VerifyDigest(c, pub, dig, bad) {
 				t.Fatalf("VerifyDigest accepted sig with byte %d flipped", i)
@@ -290,15 +306,17 @@ func TestBitFlipSweep(t *testing.T) {
 	}
 }
 
-// ─── GOST-26: Fuzz targets ─────────────────────────────────────────────────
+// ─── GOST-26: Fuzz targets ─────────────────────────────────────────────────.
 
 // mustHexFF is a fuzz-setup-time hex decode helper.
 func mustHexFF(f *testing.F, s string) []byte {
 	f.Helper()
+
 	b, err := hexDecodeStringLocal(s)
 	if err != nil {
 		f.Fatalf("bad hex %q: %v", s, err)
 	}
+
 	return b
 }
 
@@ -307,6 +325,7 @@ func mustHexFF(f *testing.F, s string) []byte {
 // (gost3410sign.go:120-122).  Seeded from the existing KATs.
 func FuzzVerifyNeverPanics(f *testing.F) {
 	c := testParamSetCurve()
+
 	pub := append(mustHexFF(f, katPubX), mustHexFF(f, katPubY)...)
 	dig := mustHexFF(f, katDigBE)
 	sig := mustHexFF(f, katSigSR)
@@ -365,6 +384,7 @@ func FuzzSignVerifyRoundTrip(f *testing.F) {
 		// A one-byte mutation of the digest must fail Verify.
 		if len(dig) > 0 {
 			mutDig := append([]byte(nil), dig...)
+
 			mutDig[0] ^= 0x01
 			if gost3410sign.VerifyDigest(c, pub, mutDig, sig) {
 				t.Fatal("VerifyDigest accepted a mutated digest")

@@ -238,16 +238,16 @@ func TestCofactorField(t *testing.T) {
 	t.Parallel()
 
 	want := map[string]int{
-		"1.2.643.2.2.35.1":     1, // CryptoPro-A
-		"1.2.643.2.2.35.2":     1, // CryptoPro-B
-		"1.2.643.2.2.35.3":     1, // CryptoPro-C (NOT 4 — see VKO-63 finding)
-		"1.2.643.7.1.2.1.1.1":  4, // tc26-256-A (twisted-Edwards, co=4)
-		"1.2.643.7.1.2.1.1.2":  1, // tc26-256-B == CryptoPro-A
-		"1.2.643.7.1.2.1.1.3":  1, // tc26-256-C == CryptoPro-B
-		"1.2.643.7.1.2.1.1.4":  1, // tc26-256-D == CryptoPro-C
-		"1.2.643.7.1.2.1.2.1":  1, // tc26-512-A
-		"1.2.643.7.1.2.1.2.2":  1, // tc26-512-B
-		"1.2.643.7.1.2.1.2.3":  4, // tc26-512-C (twisted-Edwards, co=4)
+		"1.2.643.2.2.35.1":    1, // CryptoPro-A.
+		"1.2.643.2.2.35.2":    1, // CryptoPro-B.
+		"1.2.643.2.2.35.3":    1, // CryptoPro-C (NOT 4 — see VKO-63 finding).
+		"1.2.643.7.1.2.1.1.1": 4, // tc26-256-A (twisted-Edwards, co=4).
+		"1.2.643.7.1.2.1.1.2": 1, // tc26-256-B == CryptoPro-A.
+		"1.2.643.7.1.2.1.1.3": 1, // tc26-256-C == CryptoPro-B.
+		"1.2.643.7.1.2.1.1.4": 1, // tc26-256-D == CryptoPro-C.
+		"1.2.643.7.1.2.1.2.1": 1, // tc26-512-A.
+		"1.2.643.7.1.2.1.2.2": 1, // tc26-512-B.
+		"1.2.643.7.1.2.1.2.3": 4, // tc26-512-C (twisted-Edwards, co=4).
 	}
 	for oid, wantCof := range want {
 		c := mustCurve(t, oid)
@@ -351,6 +351,7 @@ func TestIdentityEdgePaths(t *testing.T) {
 			X: new(big.Int).Set(G.X),
 			Y: new(big.Int).Sub(c.P, G.Y),
 		}
+
 		r := c.Add(G, negG)
 		if !r.IsInfinity() {
 			t.Fatalf("Add(G,-G) = (%x,%x), want ∞", r.X, r.Y)

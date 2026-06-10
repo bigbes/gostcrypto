@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/asn1"
 	"encoding/hex"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -844,7 +845,7 @@ func TestTLSTree_EngineOracle(t *testing.T) {
 	}
 }
 
-// ── FACA-73: KEG2012_256 zero-UKM branch and differential test ───────────────
+// ── FACA-73: KEG2012_256 zero-UKM branch and differential test ───────────────.
 
 // TestFacade_KEG_ZeroUKMBranch exercises the facade KEG2012_256 zero-UKM
 // path (ukmSource[:16] == 0…0 → realUKM = 00…00 01). Cross-checks the facade
@@ -924,7 +925,7 @@ func TestFacade_KEG_DifferentialVsKegPackage(t *testing.T) {
 	}
 }
 
-// ── FACA-75: streaming hash factories ────────────────────────────────────────
+// ── FACA-75: streaming hash factories ────────────────────────────────────────.
 
 // TestFacade_HashFactories verifies the streaming hash.Hash factories:
 // split-Write result == one-shot helper output, Size/BlockSize correct,
@@ -954,6 +955,7 @@ func TestFacade_HashFactories(t *testing.T) {
 		// Split write == one-shot helper.
 		h.Write(msg[:16])
 		h.Write(msg[16:])
+
 		got := h.Sum(nil)
 		want := Streebog256(msg)
 
@@ -969,6 +971,7 @@ func TestFacade_HashFactories(t *testing.T) {
 
 		// Sum appends: Sum(prefix) should start with prefix.
 		prefix := []byte{0xDE, 0xAD}
+
 		appended := h.Sum(prefix)
 		if !bytes.Equal(appended[:2], prefix) {
 			t.Fatalf("Sum(prefix) didn't preserve prefix: got %x", appended[:2])
@@ -977,6 +980,7 @@ func TestFacade_HashFactories(t *testing.T) {
 		// Reset: after Reset, a fresh hash should produce the same result.
 		h.Reset()
 		h.Write(msg)
+
 		gotAfterReset := h.Sum(nil)
 
 		if !bytes.Equal(gotAfterReset, want) {
@@ -998,6 +1002,7 @@ func TestFacade_HashFactories(t *testing.T) {
 
 		h.Write(msg[:8])
 		h.Write(msg[8:])
+
 		got := h.Sum(nil)
 		want := Streebog512(msg)
 
@@ -1022,6 +1027,7 @@ func TestFacade_HashFactories(t *testing.T) {
 
 		h.Write(msg2[:1])
 		h.Write(msg2[1:])
+
 		got := h.Sum(nil)
 		want := GOSTR341194(msg2)
 
@@ -1050,6 +1056,7 @@ func TestFacade_HashFactories(t *testing.T) {
 
 		// Sum always returns 4 zero bytes, regardless of input.
 		h.Write([]byte("anything"))
+
 		got := h.Sum(nil)
 		if len(got) != 4 || got[0] != 0 || got[1] != 0 || got[2] != 0 || got[3] != 0 {
 			t.Errorf("IMITPlaceholder Sum = %x, want 4 zero bytes", got)
@@ -1057,6 +1064,7 @@ func TestFacade_HashFactories(t *testing.T) {
 
 		// Sum appends.
 		prefix := []byte{0xFF}
+
 		appended := h.Sum(prefix)
 		if len(appended) != 5 || appended[0] != 0xFF {
 			t.Errorf("IMITPlaceholder Sum(prefix) = %x, want FF00000000", appended)
@@ -1064,7 +1072,7 @@ func TestFacade_HashFactories(t *testing.T) {
 	})
 }
 
-// ── FACA-76: GOST28147Cipher opaque handle ───────────────────────────────────
+// ── FACA-76: GOST28147Cipher opaque handle ───────────────────────────────────.
 
 // TestFacade_GOST28147Cipher_Handle exercises the GOST28147Cipher opaque
 // handle: Encrypt/Decrypt round-trip vs the primitive package output, and
@@ -1085,6 +1093,7 @@ func TestFacade_GOST28147Cipher_Handle(t *testing.T) {
 	// Round-trip.
 	back := make([]byte, 8)
 	h.Decrypt(back, dst)
+
 	if !bytes.Equal(back, pt) {
 		t.Fatalf("Encrypt+Decrypt round-trip failed:\n got %x\nwant %x", back, pt)
 	}
@@ -1101,6 +1110,7 @@ func TestFacade_GOST28147Cipher_Handle(t *testing.T) {
 	// Key-copy insulation: mutate caller's key buffer; outputs must not change.
 	keyCopy := make([]byte, len(key))
 	copy(keyCopy, key)
+
 	h2 := NewGOST28147Cipher(keyCopy, SboxTC26Z)
 
 	dst2before := make([]byte, 8)
@@ -1118,7 +1128,7 @@ func TestFacade_GOST28147Cipher_Handle(t *testing.T) {
 	}
 }
 
-// ── FACA-77: facade validation / error paths ─────────────────────────────────
+// ── FACA-77: facade validation / error paths ─────────────────────────────────.
 
 // TestFacade_ErrorPaths exercises every facade sentinel error (validation that
 // the facade itself owns, above the subpackage layer).
@@ -1169,6 +1179,7 @@ func TestFacade_ErrorPaths(t *testing.T) {
 		{"KEG_bad_ukm_len", func() error {
 			c, _ := CurveByOID(asn1.ObjectIdentifier{1, 2, 643, 7, 1, 2, 1, 1, 1})
 			_, err := KEG2012_256(c, make([]byte, 64), key32, make([]byte, 24))
+
 			return err
 		}},
 		// NewGOST28147_CNT bad key.
@@ -1234,7 +1245,7 @@ func TestFacade_ErrorPaths(t *testing.T) {
 	}
 }
 
-// ── FACA-78: VKO coverage ────────────────────────────────────────────────────
+// ── FACA-78: VKO coverage ────────────────────────────────────────────────────.
 
 // TestFacade_VKO2012_512_KAT pins VKO2012_512 against the RFC 7836 512-bit KEK
 // vector (same key pair as the existing VKO2012_256 KAT). Source: vko/vko_test.go
@@ -1269,6 +1280,7 @@ func TestFacade_VKO2001_CryptoPro(t *testing.T) {
 	t.Parallel()
 
 	c := GOST2001CryptoProAParamSetCurve()
+
 	privA, pubA, err := GenerateEphemeralKey(c, rand.Reader)
 	if err != nil {
 		t.Fatalf("GenerateEphemeralKey A: %v", err)
@@ -1397,7 +1409,7 @@ func TestFacade_PublicKeyRawFromPrivate2001Test(t *testing.T) {
 	}
 }
 
-// ── FACA-81: one-shot block helper length checks ─────────────────────────────
+// ── FACA-81: one-shot block helper length checks ─────────────────────────────.
 
 // TestFacade_BlockHelpers_LengthValidation verifies that the one-shot block
 // helpers reject inputs that are not exactly BlockSize bytes on the long side
@@ -1412,12 +1424,36 @@ func TestFacade_BlockHelpers_LengthValidation(t *testing.T) {
 		fn    func([]byte) error
 		input []byte
 	}{
-		{"KuznyechikEncrypt_long", func(in []byte) error { _, e := KuznyechikEncrypt(key32, in); return e }, make([]byte, 20)},
-		{"KuznyechikDecrypt_long", func(in []byte) error { _, e := KuznyechikDecrypt(key32, in); return e }, make([]byte, 32)},
-		{"MagmaEncrypt_long", func(in []byte) error { _, e := MagmaEncrypt(key32, in); return e }, make([]byte, 20)},
-		{"MagmaDecrypt_long", func(in []byte) error { _, e := MagmaDecrypt(key32, in); return e }, make([]byte, 16)},
-		{"GOST2814789Encrypt_long", func(in []byte) error { _, e := GOST2814789Encrypt(key32, in); return e }, make([]byte, 20)},
-		{"GOST2814789Decrypt_long", func(in []byte) error { _, e := GOST2814789Decrypt(key32, in); return e }, make([]byte, 16)},
+		{
+			"KuznyechikEncrypt_long",
+			func(in []byte) error { _, e := KuznyechikEncrypt(key32, in); return e },
+			make([]byte, 20),
+		},
+		{
+			"KuznyechikDecrypt_long",
+			func(in []byte) error { _, e := KuznyechikDecrypt(key32, in); return e },
+			make([]byte, 32),
+		},
+		{
+			"MagmaEncrypt_long",
+			func(in []byte) error { _, e := MagmaEncrypt(key32, in); return e },
+			make([]byte, 20),
+		},
+		{
+			"MagmaDecrypt_long",
+			func(in []byte) error { _, e := MagmaDecrypt(key32, in); return e },
+			make([]byte, 16),
+		},
+		{
+			"GOST2814789Encrypt_long",
+			func(in []byte) error { _, e := GOST2814789Encrypt(key32, in); return e },
+			make([]byte, 20),
+		},
+		{
+			"GOST2814789Decrypt_long",
+			func(in []byte) error { _, e := GOST2814789Decrypt(key32, in); return e },
+			make([]byte, 16),
+		},
 	}
 
 	for _, tc := range cases {
@@ -1431,7 +1467,7 @@ func TestFacade_BlockHelpers_LengthValidation(t *testing.T) {
 	}
 }
 
-// ── FACA-82: fuzz targets ────────────────────────────────────────────────────
+// ── FACA-82: fuzz targets ────────────────────────────────────────────────────.
 
 // FuzzFacadeRoundTrips exercises three facade round-trips end-to-end:
 // Kuznyechik-CTR-ACPKM encrypt/decrypt, MGM Seal/Open, and KeyWrap/Unwrap.
@@ -1439,9 +1475,9 @@ func TestFacade_BlockHelpers_LengthValidation(t *testing.T) {
 func FuzzFacadeRoundTrips(f *testing.F) {
 	// Seed from existing KATs.
 	f.Add(
-		[]byte("0123456789abcdef0123456789abcdef"), // key 32
-		[]byte("1234567890abcef0"),                 // iv 16
-		[]byte("hello gost fuzz"),                  // plaintext
+		[]byte("0123456789abcdef0123456789abcdef"), // key 32.
+		[]byte("1234567890abcef0"),                 // iv 16.
+		[]byte("hello gost fuzz"),                  // plaintext.
 	)
 	f.Add(
 		make([]byte, 32),
@@ -1535,6 +1571,7 @@ func FuzzGenerateEphemeralKey(f *testing.F) {
 	for i := range big {
 		big[i] = 0xFF
 	}
+
 	f.Add(big)
 
 	c := GOST2001TestParamSetCurve()
@@ -1544,14 +1581,15 @@ func FuzzGenerateEphemeralKey(f *testing.F) {
 		// Feed fuzz bytes as entropy; pad to at least PointSize bytes.
 		if len(rndBytes) < ps {
 			pad := make([]byte, ps-len(rndBytes))
+
 			rndBytes = append(rndBytes, pad...)
 		}
 
 		r := bytes.NewReader(rndBytes)
-		priv, pub, err := GenerateEphemeralKey(c, r)
 
+		priv, pub, err := GenerateEphemeralKey(c, r)
 		if err != nil {
-			if err == io.ErrUnexpectedEOF || err == io.EOF {
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 				return // legit short-read.
 			}
 

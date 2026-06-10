@@ -70,6 +70,7 @@ func TestSeqMACBlock_RejectsBadKeyLen(t *testing.T) {
 	// Previously returned a tag silently computed over out-of-range key bytes.
 	backing := make([]byte, 32)
 	shortKeyWithCap := backing[:16]
+
 	mustPanic(t, "16-byte key len=16 cap=32", func() {
 		gost28147imit.SeqMACBlock(shortKeyWithCap, sbox, block)
 	})
@@ -80,17 +81,17 @@ func TestSeqMACBlock_RejectsBadKeyLen(t *testing.T) {
 		gost28147imit.SeqMACBlock(make([]byte, 16), sbox, block)
 	})
 
-	// 31 bytes (just short)
+	// 31 bytes (just short).
 	mustPanic(t, "31-byte key", func() {
 		gost28147imit.SeqMACBlock(make([]byte, 31), sbox, block)
 	})
 
-	// 33 bytes (just over)
+	// 33 bytes (just over).
 	mustPanic(t, "33-byte key", func() {
 		gost28147imit.SeqMACBlock(make([]byte, 33), sbox, block)
 	})
 
-	// 32 bytes must succeed
+	// 32 bytes must succeed.
 	mustNotPanic(t, "32-byte key (valid)", func() {
 		gost28147imit.SeqMACBlock(make([]byte, 32), sbox, block)
 	})

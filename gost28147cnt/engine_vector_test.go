@@ -53,8 +53,10 @@ func TestCNT_Engine4K_CarryAndMeshing(t *testing.T) {
 	// One-shot: XOR 4096 zero bytes and compare.
 	t.Run("one-shot", func(t *testing.T) {
 		t.Parallel()
+
 		got := make([]byte, 4096)
 		gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv).XORKeyStream(got, got)
+
 		if !bytes.Equal(got, want) {
 			t.Errorf("one-shot mismatch at first diff offset %d", firstDiff(got, want))
 		}
@@ -63,11 +65,13 @@ func TestCNT_Engine4K_CarryAndMeshing(t *testing.T) {
 	// Split-write: chunks of 1000 / 96 / 3000 bytes.
 	t.Run("split-1000-96-3000", func(t *testing.T) {
 		t.Parallel()
+
 		got := make([]byte, 4096)
 		s := gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv)
 		s.XORKeyStream(got[0:1000], got[0:1000])
 		s.XORKeyStream(got[1000:1096], got[1000:1096])
 		s.XORKeyStream(got[1096:4096], got[1096:4096])
+
 		if !bytes.Equal(got, want) {
 			t.Errorf("split mismatch at first diff offset %d", firstDiff(got, want))
 		}
@@ -78,23 +82,28 @@ func TestCNT_Engine4K_CarryAndMeshing(t *testing.T) {
 // one '\n' per line) and returns the decoded bytes.
 func loadHexFixture(t *testing.T, path string) []byte {
 	t.Helper()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", path, err)
 	}
 
 	var buf []byte
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
+
 		b, err := hex.DecodeString(line)
 		if err != nil {
 			t.Fatalf("decode hex line %q: %v", line, err)
 		}
+
 		buf = append(buf, b...)
 	}
+
 	return buf
 }
 
@@ -105,5 +114,6 @@ func firstDiff(a, b []byte) int {
 			return i
 		}
 	}
+
 	return len(a)
 }
