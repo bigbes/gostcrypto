@@ -34,55 +34,50 @@ and key-meshing logic layered on top.
 - Block-cipher core it sits on: GOST 28147-89 / RFC 5830 §5–§7,
   see [`gost28147-cipher.md`](../gost28147/gost28147-cipher.md).
 
-**Repo status: gogost-backed.** The 16-round single-block transform is
-sourced from `go.stargrave.org/gogost/v7/gost28147` (vendored at
-`third_party/gogost/gost28147/mac.go`, GPL-3.0). The repo already
-**reimplements the chaining, finalization, and key meshing** itself —
-gogost's raw `gost28147.MAC` does NOT do CryptoPro key meshing and is
-destructive on a pending partial block, so it cannot be used directly for
-streaming TLS records. The two in-repo MAC drivers are:
+**Repo status: clean-room implementation.** This package (`github.com/bigbes/gostcrypto/gost28147imit`) is a BSD-2-Clause, pure-Go, zero-dependency clean-room implementation — no gogost and no GPL anywhere in the module graph. The 16-round per-block transform, the chaining, the finalization order, and the CryptoPro key meshing are all implemented natively in `gost28147imit/imit.go` without consulting gogost source. The module never had a gogost dependency; the Repo-status section above was historical scaffolding from the pre-split monorepo and has been removed.
 
-- `internal/gost/primitives_gost.go:405-489` — `GOST28147_IMIT(key, msg)`:
-  one-shot 4-byte tag with meshing, used by tests and `KeyWrapCryptoPro`'s
-  caller path.
-- `tls/internal/record/protection_gost.go:149-310` — `gostIMIT`: a
-  *streaming* MAC whose state persists across records, replicating OpenSSL's
-  EVP digest-sign semantics (finalize-on-copy, deferred last block, meshing).
+**Where the module uses it (call sites within this module)**
 
-Both call gogost only through `GOST28147Cipher.SeqMACBlock`
-(`internal/gost/exports_gost.go:98-107`), the single-block 16-round step.
-The purpose of this document is to let a GPL-free reimplementation replace
-even that one call.
+- `gostcrypto/modes.go` — `GOST28147_IMIT(key, msg)` (one-shot 4-byte tag
+  with meshing), and `GOST28147Cipher.SeqMACBlock` (the facade wrapper over
+  `gost28147imit.SeqMACBlock`).
+- `gostcrypto/exports.go` — `NewGOST28147Cipher` constructs the opaque cipher
+  handle used by gostls; `SeqMACBlock` is called on that handle by the TLS
+  record driver.
 
-**Where the repo uses it (call sites)**
+**Where the upstream TLS module uses it (call sites in `../gostls`)**
 
-- TLS record protection for the GOST-CNT suites: the `gostIMIT` driver is
-  built per direction in `tls/internal/record/protection_gost.go` and
-  serves TLS suites **0x0081** `GOST2001-GOST89-GOST89` and **0xFF85**
-  `GOST2012-GOST8912-GOST8912` (registered in
-  `tls/internal/suites/gost_suites.go:169,191`). S-box: **CryptoPro-A** for
-  0x0081, **tc26-Z** for 0xFF85, selected in
-  `tls/internal/handshake/protector_gost.go`.
-- CryptoPro key wrap (`GOST_KEY_TRANSPORT` ClientKeyExchange): the 4-byte
-  IMIT tag over the session key is computed in
-  `internal/gost/primitives_gost.go:296-303` (`KeyWrapCryptoPro`), with
-  **iv = ukm** (non-zero IV) and the diversified KEK — note this path uses
-  gogost `Cipher.NewMAC` directly because the wrapped key is exactly 32
-  bytes (< 1024, no meshing) and only one finalization is needed.
-- Placeholder hash for suite registry metadata:
-  `internal/gost/exports_gost.go:56-66`.
+- `gostls/internal/record/protection_gost.go` — `gostIMIT`: a *streaming* MAC
+  whose state persists across records, replicating OpenSSL's EVP digest-sign
+  semantics (finalize-on-copy, deferred last block, meshing). Serves TLS suites
+  **0x0081** (`GOST2001-GOST89-GOST89`, CryptoPro-A S-box) and **0xFF85**
+  (`GOST2012-GOST8912-GOST8912`, tc26-Z S-box).
+- Non-zero-IV IMIT for `GOST_KEY_TRANSPORT` key wrap is **not** handled by
+  this package; that code is in `gostcrypto/keywrap/keywrap.go` (`imit4`)
+  which implements its own 16-round step because it needs the UKM as the
+  initial state (guide D8). See `keywrap.go` and guide §D8.
+
+**Parity tests** (correctness gate) live in
+`../gostcrypto-compat/parity/gost28147imit/gost28147imit_parity_test.go` —
+the `TestDiff_InternalGostOracle` and `FuzzDiff_InternalGostOracle` tests
+diff the clean-room `IMIT` against the gogost-backed oracle for all message
+lengths including the meshing boundary. Run with:
+
+```sh
+( cd ../gostcrypto-compat && go test ./parity/gost28147imit/ )
+```
 
 **Dimensions (constants)**
 
 | Quantity              | Value                       | Source |
 |-----------------------|-----------------------------|--------|
-| Block size            | 8 bytes (64 bit)            | `third_party/gogost/gost28147/cipher.go:21` |
-| Key size              | 32 bytes (256 bit)          | `cipher.go:22` |
-| Rounds per MAC block  | 16 (`SeqMAC`)               | `third_party/gogost/gost28147/mac.go:22-25` |
-| Full IMIT tag         | 1–8 bytes                   | `mac.go:42` (`0<size<=8`) |
-| TLS tag (truncated)   | 4 bytes                     | RFC 9189 §4.2; `primitives_gost.go:488` |
+| Block size            | 8 bytes (64 bit)            | RFC 5830 §6 / `gost28147imit/imit.go:blockSize` |
+| Key size              | 32 bytes (256 bit)          | RFC 5830 §6 / `imit.go:keySize` |
+| Rounds per MAC block  | 16 (`SeqMAC`)               | RFC 5830 §8; `tmp/engine/gost89.c:657-672` |
+| Full IMIT tag         | 1–8 bytes                   | RFC 5830 §8 |
+| TLS tag (truncated)   | 4 bytes                     | RFC 9189 §4.2; `imit.go:tlsTagLen` |
 | Key-meshing period    | 1024 processed bytes        | `tmp/engine/gost_crypt.c:1519`; RFC 4357 §2.3.2 |
-| Meshing constant      | 32 bytes (see §2.3)         | `internal/gost/primitives_gost.go:398-403` |
+| Meshing constant      | 32 bytes (see §2.3)         | `tmp/engine/gost89.c:240-245`; `imit.go:cryptoProKeyMeshingKey` |
 
 
 ## Specification
@@ -97,16 +92,16 @@ IMIT runs the GOST 28147-89 encryption step but **stops after 16 rounds**
 SeqMAC = [0,1,2,3,4,5,6,7,  0,1,2,3,4,5,6,7]
 ```
 
-Source: `third_party/gogost/gost28147/mac.go:22-25`. Engine equivalent: the
-two unrolled 8-round groups in `mac_block` (`tmp/engine/gost89.c:657-672`) —
-note it applies `key[0..7]` then `key[0..7]` again, 16 rounds total, never
-the reverse pass. RFC 5830 §8 states the imitovstavka uses the first 16
-cycles of the basic encryption step.
+Engine source: two unrolled 8-round groups in `mac_block`
+(`tmp/engine/gost89.c:657-672`) — applies `key[0..7]` then `key[0..7]`
+again, 16 rounds total, never the reverse pass. RFC 5830 §8 states the
+imitovstavka uses the first 16 cycles of the basic encryption step.
 
 The 16-round transform is **not reachable through any public cipher
 encrypt/decrypt API** (those are hardwired to 32 rounds), which is exactly
-why the repo surfaces it as a distinct method,
-`GOST28147Cipher.SeqMACBlock` (`exports_gost.go:98-107`). A reimplementer
+why this package surfaces it as `SeqMACBlock`
+(`gost28147imit/imit.go:SeqMACBlock`) and the facade at
+`gostcrypto/exports.go:GOST28147Cipher.SeqMACBlock`. A reimplementer
 must implement the 16-round `xcrypt(SeqMAC, n1, n2)` directly over the
 round function from [`gost28147-cipher.md`](../gost28147/gost28147-cipher.md) §2–§3.
 
@@ -182,18 +177,13 @@ Three padding rules, all from `tmp/engine/gost_crypt.c:1559-1580`
    of length ≥ 9 (at least one full block followed by more) does NOT get the
    trailing zero block.
 
-   > **Repo conformance.** The in-repo `GOST28147_IMIT`
-   > (`primitives_gost.go`) and the streaming `gostIMIT`
-   > (`protection_gost.go`) implement exactly this order — the (zero-padded)
-   > data block first, then the trailing all-zero block — so they **match
-   > gost-engine for inputs ≤ 8 bytes**. Concretely (verified via the V5 CLI
-   > oracle and `go test`): 5-byte `"12345"` → `77a62d81`; 8-byte
-   > `"12345670"` → `ac2b5ad6` (see V3). An earlier revision fed a *leading*
-   > all-zero block before the data partial and therefore returned the wrong
-   > tags (`ad403afe` / `832e9da4`); that was a latent bug — never hit by TLS,
-   > whose record-layer framing prefix makes the MAC input ≥ 13 bytes (D5/D7) —
-   > found by review and fixed. It is now pinned by
-   > `TestGost_GOST28147_IMIT_EngineShortMessages`.
+   > **Repo conformance.** `gost28147imit/imit.go` (`imit()`) and
+   > `gostls/internal/record/protection_gost.go` (`gostIMIT`) implement
+   > exactly this order — the (zero-padded) data block first, then the
+   > trailing all-zero block — so they **match gost-engine for inputs ≤ 8
+   > bytes**. Concretely: 5-byte `"12345"` → `77a62d81`; 8-byte `"12345670"`
+   > → `ac2b5ad6` (see V3). These values are pinned by
+   > `TestIMIT_GuideVectors/V3_*` in `gost28147imit/imit_test.go`.
 
 ### 2.2 Worked example of the padding rule
 
@@ -232,10 +222,11 @@ NOT the 16-round MAC step. Engine: `cryptopro_key_meshing`
 newkey, 4)` then `gost_key(ctx, newkey)`. For the IMIT/MAC path the IV is
 **not** re-encrypted (engine passes `iv = NULL` from `mac_block_mesh`,
 `gost_crypt.c:1513-1520`) — the running MAC state buffer is preserved
-unchanged across the mesh. The repo does this at
-`primitives_gost.go:446-457` and `protection_gost.go:183-192`.
+unchanged across the mesh. This module implements it in
+`gost28147imit/imit.go:macCipher.mesh()`, and gostls mirrors the same logic
+in `gostls/internal/record/protection_gost.go:meshKey()`.
 
-The 32-byte meshing constant `C` (`internal/gost/primitives_gost.go:398-403`;
+The 32-byte meshing constant `C` (`gost28147imit/imit.go:cryptoProKeyMeshingKey`;
 engine `tmp/engine/gost89.c:240-245`, byte-for-byte identical):
 
 ```
@@ -264,8 +255,9 @@ mac_block_mesh(c, data):
 Source: `tmp/engine/gost_crypt.c:1510-1524`. **The wrap is `count % 1024 +
 8`, not `count = 0`** — so after a mesh at `count==1024`, the counter
 becomes `1024 % 1024 + 8 = 8`, and the next mesh is again 1024 bytes
-(128 blocks) later. The repo mirrors this exactly:
-`primitives_gost.go:442,458,463` and `protection_gost.go:198,206`.
+(128 blocks) later. This module mirrors this in `imit.go`'s `process` closure
+(`count = count%meshPeriod + blockSize`), and gostls mirrors it in
+`protection_gost.go`'s `Write`/`processBlockMesh`.
 
 
 ## RFC ↔ implementation deltas
@@ -275,11 +267,12 @@ RFC and the source line.
 
 ### D1. 16-round `SeqMAC`, not the 32-round cipher (RFC 5830 §8)
 
-IMIT is 16 rounds (`SeqMAC`, `mac.go:22-25`; engine two-pass `mac_block`,
-`gost89.c:657-672`); the cipher is 32 (`SeqEncrypt`). Using the 32-round
-schedule for the MAC silently produces a plausible-looking but wrong 8-byte
-value. The 16-round step is otherwise unreachable through the public cipher
-API, hence `SeqMACBlock` (`exports_gost.go:98-107`). The key-meshing ECB
+IMIT is 16 rounds (engine two-pass `mac_block`, `gost89.c:657-672`); the
+cipher is 32 (`SeqEncrypt`). Using the 32-round schedule for the MAC silently
+produces a plausible-looking but wrong 8-byte value. The 16-round step is
+otherwise unreachable through the public cipher API, hence
+`gost28147imit.SeqMACBlock` (this package) and the facade wrapper
+`GOST28147Cipher.SeqMACBlock` (`gostcrypto/exports.go`). The key-meshing ECB
 *decrypt* in §2.3, by contrast, **does** use the 32-round schedule.
 
 ### D2. MAC octet ordering is "natural"; the cipher's is swapped
@@ -303,20 +296,18 @@ next record's MAC continues from where the previous one left off
 engine `gost_imit_final` finalizes from `c->buffer`/`c->bytes_left` without
 clearing them.
 
-A correct reimplementation's `Finalize` must **snapshot** `(prev, buf,
+A correct streaming MAC's `Finalize` must **snapshot** `(prev, buf,
 bufLen, count)`, run the zero-prefix + zero-pad logic on the snapshot, and
-return the tag, leaving the receiver untouched. The repo does this in
-`protection_gost.go:259-310` (`gostIMIT.Finalize`).
+return the tag, leaving the receiver untouched. gostls implements this in
+`gostls/internal/record/protection_gost.go:gostIMIT.Finalize`.
 
 **Corollary — gogost `MAC.Sum` is destructive.** `gost28147.MAC.Sum`
-(`mac.go:84-99`) reassigns `m.n1, m.n2` (`mac.go:95-96`) and, when a
-partial block is pending, XOR-folds it into a buffer that aliases internal
-state — violating the `hash.Hash` contract. **Never call `Sum` on a gogost
-MAC you intend to `Write` to again.** This is the single biggest trap when
-trying to use gogost's MAC for streaming TLS; it is why the repo drives the
-MAC block-by-block through `SeqMACBlock` and keeps its own `prev`/`buf`
-rather than calling gogost's `Write`/`Sum`. (CLAUDE.md, "gogost/v7 library
-gotchas".)
+reassigns internal state — violating the `hash.Hash` contract. **Never call
+`Sum` on a gogost MAC you intend to `Write` to again.** This is the single
+biggest trap when trying to use gogost's MAC for streaming TLS; gostls
+drives the MAC block-by-block through `SeqMACBlock` and keeps its own
+`prev`/`buf` rather than calling gogost's `Write`/`Sum`. (CLAUDE.md,
+"gogost/v7 library gotchas".)
 
 ### D4. Deferred last block: `while (bytes > 8)`, strictly greater (engine `gost_imit_update`)
 
@@ -335,18 +326,17 @@ c->bytes_left = bytes;
 Why it matters: using `>= 8` would process that trailing block one
 `Update`-call earlier, shifting the `count` and therefore the **key-meshing
 boundary** by one block. On records that cross a 1024-byte boundary this
-silently corrupts the tag. The repo replicates the strict `> 8` and the
+silently corrupts the tag. gostls replicates the strict `> 8` and the
 "defer a full buffered block unless more data follows" rule in
-`protection_gost.go:214-245` (note the explicit `for len(data)-i >
-gostBlockSize` and the `remaining > 0` guard at lines 227-234).
+`gostls/internal/record/protection_gost.go:gostIMIT.Write` (note the
+explicit `for len(data)-i > gostBlockSize` loop).
 
-The one-shot wrapper `GOST28147_IMIT` (`primitives_gost.go:467-485`)
-doesn't stream, so it instead processes `len/8` full blocks eagerly and
-handles the remainder — but it reproduces the *same observable result*
-because for a one-shot call the deferred-block distinction only changes
-*when*, not *whether*, each block is processed, and the meshing counter
-ends up identical. The streaming `gostIMIT` is the one that must honor the
-`> 8` rule precisely.
+The one-shot `gostcrypto.GOST28147_IMIT` (`gostcrypto/modes.go`)
+doesn't stream, so it processes all full blocks eagerly and handles the
+remainder — but it reproduces the *same observable result* because for a
+one-shot call the deferred-block distinction only changes *when*, not
+*whether*, each block is processed. The streaming `gostIMIT` is the one
+that must honor the `> 8` rule precisely.
 
 ### D5. Trailing zero block for short messages, lengths 1–8 (engine `gost_imit_final`)
 
@@ -361,65 +351,56 @@ The one-shot `gost_mac` matches with `if (i == 8) { mac_block(zeros) }`
 (`gost89.c:716-719`), which also fires for exactly-8-byte input. See §2.1
 rule 3 and the §2.2 table.
 
-**The repo's `GOST28147_IMIT`/`gostIMIT` implement this engine order** — the
-(zero-padded) data block first, then the trailing all-zero block — so they
-**match gost-engine for every input ≤ 8 bytes** (e.g. 5-byte `"12345"` →
-`77a62d81`; 8-byte `"12345670"` → `ac2b5ad6`; V3). An earlier revision fed the
-all-zero block *first* (a leading zero block) and returned the wrong tags
-(`ad403afe` / `832e9da4`); that was a latent bug — the TLS MAC input is never
-shorter than 8 bytes in practice (the framing prefix is 13 bytes, D7), so it
-never manifested in the handshake or record path and was only observable on a
-direct short-input unit test. It was found by review and fixed in
-`primitives_gost.go` + `protection_gost.go`, and is now pinned by
-`TestGost_GOST28147_IMIT_EngineShortMessages`.
+**`gost28147imit/imit.go` and `gostls/internal/record/protection_gost.go`
+implement this engine order** — the (zero-padded) data block first, then the
+trailing all-zero block — so they **match gost-engine for every input ≤ 8
+bytes** (e.g. 5-byte `"12345"` → `77a62d81`; 8-byte `"12345670"` → `ac2b5ad6`;
+V3). These values are pinned by `TestIMIT_GuideVectors/V3_*` in
+`gost28147imit/imit_test.go`.
 
 ### D6. CryptoPro key meshing every 1024 bytes (RFC 4357 §2.3.2)
 
-gogost's raw `gost28147.MAC` omits meshing entirely; the repo adds it
-(`primitives_gost.go:442-458`, `protection_gost.go:183-207`). ECB-**decrypt**
-the constant `C` (§2.3) with the current key to get the new key; do NOT
-re-encrypt the MAC state (iv=NULL). Counter wraps `count%1024+8` (§2.4).
-This is the divergence resolved in `TODO.md:11` — the raw MAC matches the
-engine up to 1024 bytes and diverges after. Manifests first on large
-application-data records, never during the handshake.
+gogost's raw `gost28147.MAC` omits meshing entirely; this package adds it
+(`gost28147imit/imit.go:macCipher.mesh()`). ECB-**decrypt** the constant `C`
+(§2.3) with the current key to get the new key; do NOT re-encrypt the MAC
+state (iv=NULL). Counter wraps `count%1024+8` (§2.4). This is the divergence
+documented in `TODO.md` — the raw gogost MAC matches the engine up to 1024
+bytes and diverges after. Manifests first on large application-data records,
+never during the handshake.
 
 ### D7. TLS framing and 4-byte truncation are the Protector's job, not the MAC's
 
 The MAC primitive takes a key and an opaque byte string. The TLS MAC input
 — `seq_num(8) ‖ type(1) ‖ version(2) ‖ length(2) ‖ plaintext` (RFC 5246
 §6.2.3.1 / RFC 9189) — is assembled by the record-layer Protector
-(`tls/internal/record/protection_gost.go`), not by `GOST28147_IMIT`. The
-8-byte IMIT is then truncated to its leading **4 bytes** (RFC 9189 §4.2;
-`primitives_gost.go:488` `full[:4]`). A reimplementer should keep the MAC
+(`gostls/internal/record/protection_gost.go`), not by `gost28147imit.IMIT`.
+The 8-byte IMIT is then truncated to its leading **4 bytes** (RFC 9189 §4.2;
+`gost28147imit/imit.go:tlsTagLen = 4`). A reimplementer should keep the MAC
 generic (return up to 8 bytes) and truncate at the call site. Note that
-`get_mac` (`tmp/engine/gost89.c:686-696`) takes a *bit* length and masks
-the final byte — for byte-aligned sizes like 32 bits this is a plain
-4-byte prefix.
+`get_mac` (`tmp/engine/gost89.c:686-696`) takes a *bit* length and masks the
+final byte — for byte-aligned sizes like 32 bits this is a plain 4-byte prefix.
 
 ### D8. Key-transport IMIT uses a non-zero IV (UKM), and no meshing
 
-In `KeyWrapCryptoPro` (`primitives_gost.go:296-303`) the IMIT over the
-32-byte session key is computed with **iv = ukm** (8 bytes), not zeros, via
-`Cipher.NewMAC(4, ukm)`. The wrapped data is exactly 32 bytes (< 1024) so
-meshing never fires, and gogost's `MAC.Sum` is safe here because it is
-`Write`-then-`Sum`-once. This is the one place the repo uses gogost's MAC
-finalization directly. RFC 4357 §6.3 (CryptoPro KEK wrap). A from-scratch
-MAC must therefore accept an arbitrary 8-byte initial state, not assume
-zeros.
+In `KeyWrapCryptoPro` (`gostcrypto/keywrap/keywrap.go:imit4`) the IMIT over
+the 32-byte session key is computed with **iv = ukm** (8 bytes), not zeros.
+The wrapped data is exactly 32 bytes (< 1024) so meshing never fires. This
+path is implemented inline in `keywrap.imit4` rather than using
+`gost28147imit.IMIT` because it needs the UKM as the initial chaining state
+— this package's `IMIT` always uses a zero IV. RFC 4357 §6.3 (CryptoPro KEK
+wrap). The `imit()` internal function in this package formerly accepted an
+arbitrary IV parameter for this use case; it was removed because keywrap
+never called it (it had its own inline implementation), making the parameter
+dead code.
 
 
 ## Test vectors
 
-All tags below are 4-byte TLS-truncated IMIT under the **CryptoPro-A**
-S-box (`SboxDefault`), IV = all zeros. **V1, V2, and V3 are engine-validated**:
-produced by this repo's `GOST28147_IMIT` AND cross-checked against
-gost-engine v3.0.3 `test/02-mac.t`. V3 covers the ≤ 8-byte short-message case
-(see §2.1 rule 3 / D5), where the repo wrapper now returns the engine values —
-pinned by `TestGost_GOST28147_IMIT_EngineShortMessages`. Re-run with
-`go test -tags gost ./internal/gost/`; cross-check any new vector with the
-V5 CLI oracle.
+All tags below are 4-byte TLS-truncated IMIT, IV = all zeros. **V1, V2, and
+V3 are engine-validated**: cross-checked against gost-engine v3.0.3
+`test/02-mac.t`. All are pinned by `gost28147imit/imit_test.go`.
 
-### V1. Engine-sourced, 1024 bytes, no meshing (inline, runnable)
+### V1. Engine-sourced, 1024 bytes, no meshing (CryptoPro-A)
 
 ```
 S-box:       CryptoPro-A (1.2.643.2.2.31.1)
@@ -430,19 +411,13 @@ IMIT-4 tag:        2ee8d13d
 full IMIT-8 tag:   2ee8d13dff7f037d
 ```
 
-Source: `tmp/engine/test/02-mac.t:158-173`, ported at
-`internal/gost/primitives_engine_vectors_test.go:233-238` (8-byte) and
-asserted via the wrapper at
-`primitives_engine_vectors_test.go:380-399` (`...IMIT_Wrapper_NoMeshing`,
-4-byte). 1024 bytes sits exactly at the meshing boundary but does **not**
-trigger a mesh (the check is `count == 1024` *before* a block, and the last
-block leaves `count` at 1024 only *after* finalizing) — so this is the
-largest input still equal to the raw, meshing-free MAC.
+Source: `tmp/engine/test/02-mac.t:158-173`. Pinned by
+`TestIMIT_GuideVectors/V1_1024B_no_mesh`. 1024 bytes sits exactly at the
+meshing boundary but does **not** trigger a mesh (the check is `count ==
+1024` *before* a block, and the last block advances `count` to 1024 *after*
+finalizing) — so this is the largest input still equal to the meshing-free MAC.
 
-A correct from-scratch implementation MUST reproduce `2ee8d13d` (and
-`2ee8d13dff7f037d` for size=8).
-
-### V2. Engine-sourced, >1024 bytes, meshing exercised (inline, runnable)
+### V2. Engine-sourced, >1024 bytes, meshing exercised (CryptoPro-A)
 
 ```
 S-box:       CryptoPro-A
@@ -452,53 +427,58 @@ message:           ("12345670" repeated 8 times, then a "\n" byte) repeated 4096
 IMIT-4 tag:        5efab81f
 ```
 
-Source: `tmp/engine/test/02-mac.t:181-187`; asserted at
-`internal/gost/primitives_engine_vectors_test.go:362-378`
-(`...IMIT_Wrapper_KeyMeshing`). This input crosses the 1024-byte boundary
-260 times, so an implementation that omits key meshing (D6) or wraps the
-counter wrong (D4/§2.4) will NOT produce `5efab81f`.
+Source: `tmp/engine/test/02-mac.t:181-187`. Pinned by
+`TestIMIT_GuideVectors/V2_266240B_mesh`. This input crosses the 1024-byte
+boundary 260 times, so an implementation that omits key meshing (D6) or
+wraps the counter wrong (D4/§2.4) will NOT produce `5efab81f`.
 
-### V3. Short single- and double-block tags (inline; exercise §2.1)
+### V3. Short single- and double-block tags (CryptoPro-A; exercise §2.1)
 
 Key is the V1 key, `"0123456789abcdef0123456789abcdef"` (32B ASCII).
 **KAT target = the engine value** (computed with the V5 CLI oracle,
-`openssl dgst -engine gost -mac gost-mac -macopt hexkey:…`), which the repo
-`GOST28147_IMIT` now also returns:
+`openssl dgst -engine gost -mac gost-mac -macopt hexkey:…`):
 
 ```
-msg "12345"             (5 bytes, partial)          -> 77a62d81   (engine = repo)
-msg "12345670"          (8 bytes, one full block)   -> ac2b5ad6   (engine = repo)
-msg "1234567012345670"  (16 bytes, two full blocks) -> 7862d83a   (engine = repo)
+msg "12345"             (5 bytes, partial)          -> 77a62d81
+msg "12345670"          (8 bytes, one full block)   -> ac2b5ad6
+msg "1234567012345670"  (16 bytes, two full blocks) -> 7862d83a
 ```
 
-> **Engine-validated (≤ 8 bytes).** All three rows are returned identically by
-> gost-engine and the in-repo `GOST28147_IMIT`. The 5-byte and 8-byte rows
-> exercise the engine's *trailing* all-zero block (§2.1 rule 3, D5); the
-> 16-byte case (two full blocks, no trailing zero block) needs no extra block.
-> These values (`77a62d81`, `ac2b5ad6`, `7862d83a`) are the correct RFC/engine
-> result and the conformance target, pinned by
-> `TestGost_GOST28147_IMIT_EngineShortMessages`. An earlier repo revision
-> returned `ad403afe` / `832e9da4` for the short rows (a latent leading-zero
-> bug) — those values are GONE.
+The 5-byte and 8-byte rows exercise the engine's *trailing* all-zero block
+(§2.1 rule 3, D5); the 16-byte case (two full blocks) does not. Pinned by
+`TestIMIT_GuideVectors/V3_*`.
 
-The 5- and 8-byte cases trigger the trailing-zero-block rule (§2.1 rule 3:
-length ≤ 8, `count == 0` at finalization); the 16-byte case is two full
-blocks with no trailing zero block. Use the 16-byte vector to pin the plain
-chaining (§2) before adding the short-message and meshing logic.
+### V4. tc26-Z, 1024 bytes (engine gost-mac-12)
 
-### V4. Repo unit tests
+```
+S-box:       tc26-Z (id-tc26-gost-28147-param-Z)
+key  (32B, ASCII): "0123456789abcdef0123456789abcdef"
+message:           "12345670" repeated 128 times  (1024 bytes)
+IMIT-4 tag:        be4453ec
+full IMIT-8 tag:   be4453ec1ec327be
+```
 
-- `internal/gost/primitives_test.go:135-166` — determinism + key-sensitivity
-  of `GOST28147_IMIT`.
-- `internal/gost/primitives_engine_vectors_test.go` — the full ported
-  `test/02-mac.t` table (gost-mac sizes 4 and 8, tc26-Z variants) plus the
-  two wrapper meshing tests above.
-- End-to-end: `TestTarantoolEE_Ping_GOST_Pure` (0x0081, 0xFF85) against a
-  live Tarantool-EE 3.5.0 server — the strongest signal that the streaming
-  `gostIMIT`, its framing, meshing, and 4-byte truncation all match
-  gost-engine on real records.
+Source: `tmp/engine/test/02-mac.t:190-194` (gost-mac-12, testdata.dat).
+Pinned by `TestIMIT_TC26Z_1024B_Meshing` in `gost28147imit/imit_test.go`.
+This is the primary tc26-Z + meshing coverage point: a regression in
+`macCipher.mesh()` that hardcodes CryptoPro-A for the ECB-decrypt step would
+only be caught here.
 
-### V5. gost-engine CLI oracle (cross-check any new vector)
+### V5. SeqMACBlock step-1 raw chaining state
+
+```
+key  (32B, ASCII): "0123456789abcdef0123456789abcdef"
+block:             "12345670"
+CryptoPro-A state: 832e9da41b6e6d6b   (guide §checklist step 1)
+tc26-Z state:      611451608741d776   (computed 2026-06-10)
+```
+
+The state returned by `SeqMACBlock` is the *raw* 16-round chaining state
+before finalization. It differs from the finalized IMIT of `"12345670"`
+(`ac2b5ad6…`) because finalization for an 8-byte input appends a trailing
+all-zero block (§2.1 rule 3). Pinned by `TestSeqMACBlock_GuideStep1KAT`.
+
+### V6. gost-engine CLI oracle (cross-check any new vector)
 
 Per CLAUDE.md, compute the engine's reference IMIT for arbitrary input:
 
@@ -506,11 +486,12 @@ Per CLAUDE.md, compute the engine's reference IMIT for arbitrary input:
 OPENSSL_CONF=/opt/homebrew/etc/gost/gost-engine.cnf \
 /opt/homebrew/opt/openssl@3/bin/openssl dgst -engine gost \
   -mac gost-mac -macopt hexkey:<32B-hex> /path/to/input.bin
+# tc26-Z: use -mac gost-mac-12 instead
 ```
 
 Note `-macopt hexkey:` hex-decodes the key; `-macopt key:` takes raw ASCII
-bytes (the `TODO.md:33` gotcha — the V1/V2 keys above are ASCII strings, so
-their hex form is the ASCII bytes of the digits).
+bytes (the V1/V2 keys above are ASCII strings, so their hex form is the
+ASCII bytes of the digits).
 
 
 ## Re-implementation checklist
@@ -542,10 +523,9 @@ round function `f`, LE pack/unpack) already exists and passes its own V1.
 4. **Partial-block padding + trailing zero block (§2.1, D5).** If a trailing
    1–7 bytes remain, zero-pad to 8 and process. If `count == 0` at
    finalization (total length ≤ 8), process the (zero-padded) data block
-   FIRST, then append one all-zero block. Test against the engine values
-   (which the repo now also returns): 5-byte `"12345"` → `77a62d81`, 8-byte
-   `"12345670"` → `ac2b5ad6` (see V3 / D5;
-   `TestGost_GOST28147_IMIT_EngineShortMessages` pins both).
+   FIRST, then append one all-zero block. Test against V3 engine values:
+   5-byte `"12345"` → `77a62d81`, 8-byte `"12345670"` → `ac2b5ad6` (pinned by
+   `TestIMIT_GuideVectors/V3_*`).
 
 5. **Key meshing (§2.3, §2.4, D6).** Add a `count` counter advanced by 8 per
    full block and wrapped `count = count%1024 + 8`. Before processing a
@@ -563,9 +543,9 @@ round function `f`, LE pack/unpack) already exists and passes its own V1.
    one-shot MAC over the concatenated input. Test against the live
    Tarantool-EE ping (V4) for the full record-layer integration.
 
-7. **Non-zero IV path for key transport (D8).** Allow the initial state to
-   be an arbitrary 8-byte IV (the UKM). Test: reproduce a `KeyWrapCryptoPro`
-   tag (`primitives_gost.go:296-308`) against the gogost-backed result.
+7. **Non-zero IV path for key transport (D8).** This package only exposes a
+   zero-IV IMIT. The non-zero-IV case (UKM-seeded key-transport IMIT) is
+   handled by `gostcrypto/keywrap/keywrap.go:imit4` — see §D8.
 
 8. **tc26-Z parity.** Repeat steps 1–6 with the tc26-Z S-box (0xFF85);
    meshing constant and period are unchanged (§2.3). Cross-check with V5
@@ -574,166 +554,39 @@ round function `f`, LE pack/unpack) already exists and passes its own V1.
 
 ## Conformance & fuzz testing
 
-Once your clean-room IMIT compiles, prove it by differential testing against
-the references this doc already pins. The primary oracle is the in-repo
-`internal/gost.GOST28147_IMIT(key, msg []byte) ([]byte, error)`
-(`primitives_gost.go:424`) — it returns the **4-byte** TLS-truncated tag with
-CryptoPro key meshing, exactly what your driver must match against vectors
-V1–V3. A secondary check for **short inputs only** (< 1024 bytes, no meshing)
-is gogost's raw `gost28147.MAC` (`third_party/gogost/gost28147/mac.go:41,84`):
-build a `Cipher.NewMAC(8, zeroIV)`, `Write` the message, `Sum(nil)` — but
-`MAC.Sum` is **destructive** (D3; `mac.go:84-99` reassigns `n1/n2`), so
-**re-create the MAC per call** and never `Sum` twice. Fuzz with a random
-32-byte key and an arbitrary-length message; force coverage past the 1024-byte
-meshing boundary (D6) by padding the corpus and growing the random input, since
-gogost's raw MAC diverges from the engine above 1024 bytes and only
-`GOST28147_IMIT` is correct there.
+The implementation is proved correct by differential testing against the
+gogost-backed oracle. The parity tests live in
+`../gostcrypto-compat/parity/gost28147imit/`:
 
-### KAT test — pinned vectors V1/V3
+- `TestDiff_InternalGostOracle` — 200 random keys × many lengths (including all
+  lengths 1–16 and meshing-crossing sizes up to 12345) — diffs the clean-room
+  `IMIT` against `gostcryptocompat.GOST28147_IMIT` (the gogost-backed reference).
+- `FuzzDiff_InternalGostOracle` — same comparison under the fuzzer.
 
-Seeded with the exact hex from §"Test vectors" (V1 `2ee8d13d`, V3 16-byte
-`7862d83a`, and the ≤ 8-byte V3 rows). The in-repo `refgost.GOST28147_IMIT`
-oracle now returns the engine values for **all** lengths, including the short
-cases (`"12345"` → `77a62d81`, `"12345670"` → `ac2b5ad6`), so it agrees with a
-correct clean-room impl everywhere; the V5 CLI oracle stays as an additional
-reference. Replace `mynew` with your package.
-
-```go
-//go:build gost
-
-package mynew_test
-
-import (
-	"bytes"
-	"encoding/hex"
-	"strings"
-	"testing"
-
-	refgost "go.bigb.es/tlsdialer/internal/gost" // in-repo reference oracle
-	mynew "github.com/.../yourpkg"          // clean-room impl under test
-)
-
-// key is the ASCII V1/V3 key; its hex form is the ASCII bytes of the digits.
-var imitKey = []byte("0123456789abcdef0123456789abcdef")
-
-func TestIMITConformance(t *testing.T) {
-	cases := []struct {
-		name string
-		msg  []byte
-		want string // 4-byte TLS-truncated tag, hex
-	}{
-		{"V1_1024B_no_mesh", []byte(strings.Repeat("12345670", 128)), "2ee8d13d"},
-		{"V3_two_blocks", []byte("1234567012345670"), "7862d83a"},
-		{"V3_partial_5B", []byte("12345"), "77a62d81"},   // trailing zero block (§2.1 rule 3)
-		{"V3_one_block_8B", []byte("12345670"), "ac2b5ad6"}, // 8B + trailing zero block
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			want, _ := hex.DecodeString(tc.want)
-
-			got := mynew.IMIT(imitKey, tc.msg) // clean-room: returns 4-byte tag
-			if !bytes.Equal(got, want) {
-				t.Fatalf("clean-room IMIT(%s) = %x, want %s", tc.name, got, tc.want)
-			}
-
-			ref, err := refgost.GOST28147_IMIT(imitKey, tc.msg)
-			if err != nil {
-				t.Fatalf("reference GOST28147_IMIT: %v", err)
-			}
-			if !bytes.Equal(ref, want) {
-				t.Fatalf("reference IMIT(%s) = %x, want %s", tc.name, ref, tc.want)
-			}
-		})
-	}
-}
-```
-
-### Fuzz harness — clean-room vs in-repo oracle
-
-Seeds from the KAT inputs, normalizes the random `[]byte` into a fixed 32-byte
-key plus an arbitrary message, and runs both impls on identical bytes. Random
-inputs are grown to push some cases past 1024 bytes so meshing is exercised.
-
-The in-repo `refgost.GOST28147_IMIT` oracle matches the engine (and a correct
-clean-room impl) for **all** message lengths, including ≤ 8 bytes (the engine's
-trailing zero block, §2.1 rule 3, D5). So this fuzz diffs against the repo
-oracle for every length, short inputs included; the V5 CLI oracle (the
-`imitEngineCLI` helper below) remains available as an additional cross-check.
-
-```go
-//go:build gost
-
-package mynew_test
-
-import (
-	"bytes"
-	"strings"
-	"testing"
-
-	refgost "go.bigb.es/tlsdialer/internal/gost"
-	mynew "github.com/.../yourpkg"
-)
-
-func FuzzIMITConformance(f *testing.F) {
-	f.Add([]byte(strings.Repeat("12345670", 128)))           // V1, 1024B
-	f.Add([]byte("12345670"))                                // V3, 1 block
-	f.Add([]byte("1234567012345670"))                        // V3, 2 blocks
-	f.Add([]byte(strings.Repeat("12345670", 200)))           // > 1024B, meshing
-
-	key := []byte("0123456789abcdef0123456789abcdef") // fixed 32-byte key
-
-	f.Fuzz(func(t *testing.T, msg []byte) {
-		// The repo oracle matches the engine for all lengths, including ≤ 8
-		// bytes (the engine's trailing zero block, §2.1 rule 3 / D5), so we
-		// diff against it for every input. imitEngineCLI (V5) is an optional
-		// extra cross-check for the short window.
-		got := mynew.IMIT(key, msg)
-
-		ref, err := refgost.GOST28147_IMIT(key, msg)
-		if err != nil {
-			t.Fatalf("reference GOST28147_IMIT(len=%d): %v", len(msg), err)
-		}
-		if !bytes.Equal(got, ref) {
-			t.Fatalf("mismatch on len=%d: clean-room %x != reference %x", len(msg), got, ref)
-		}
-	})
-}
-```
-
-For primitives whose only reference is the gost-engine CLI (OMAC, CTR-ACPKM,
-KEG, KExp15, KeyWrap — no gogost API), the IMIT path also has a CLI oracle
-(V5). Shell out to it instead of importing a reference, e.g. as a test helper:
-
-```go
-// imitEngineCLI returns the engine's 8-byte gost-mac tag for key+msg.
-// Reference: CLAUDE.md "CLI oracles"; doc §V5.
-func imitEngineCLI(t *testing.T, key, msg []byte) []byte {
-	t.Helper()
-	in := filepath.Join(t.TempDir(), "in.bin")
-	if err := os.WriteFile(in, msg, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(
-		"/opt/homebrew/opt/openssl@3/bin/openssl", "dgst", "-engine", "gost",
-		"-mac", "gost-mac", "-macopt", "hexkey:"+hex.EncodeToString(key), in,
-	)
-	cmd.Env = append(os.Environ(), "OPENSSL_CONF=/opt/homebrew/etc/gost/gost-engine.cnf")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("engine CLI: %v", err)
-	}
-	// output is "...= <hextag>\n"; parse the trailing hex, then take [:4] for TLS.
-	field := strings.TrimSpace(string(out[bytes.LastIndexByte(out, ' ')+1:]))
-	tag, _ := hex.DecodeString(field)
-	return tag
-}
-```
-
-### Run commands
+Run:
 
 ```sh
-go test -tags gost -run TestIMITConformance ./yourpkg/
-go test -tags gost -fuzz=FuzzIMITConformance -fuzztime=30s ./yourpkg/
+( cd ../gostcrypto-compat && go test ./parity/gost28147imit/ )
+( cd ../gostcrypto-compat && go test -fuzz=FuzzDiff_InternalGostOracle -fuzztime=30s ./parity/gost28147imit/ )
+```
+
+The unit tests in this package (`gost28147imit/imit_test.go`,
+`gost28147imit/guard_test.go`) pin:
+
+- `TestIMIT_GuideVectors` — V1, V2, V3 vectors (CryptoPro-A, various lengths)
+- `TestIMIT_EngineTclVectors` — ported `tmp/engine/tcl_tests/mac.try` vectors
+- `TestIMIT_TC26Z_1024B_Meshing` — tc26-Z + meshing (V4)
+- `TestSeqMACBlock_GuideStep1KAT` — raw chaining state for one block (V5)
+- `TestSeqMACBlock_StreamingMatchesIMIT` — streaming SeqMACBlock driver agrees
+  with one-shot IMIT
+- `TestSeqMACBlock_RejectsBadKeyLen`, `TestSeqMACBlock_RejectsBadBlockLen` —
+  validation panics
+- `TestIMIT_RejectsEmpty` — empty-message panic
+
+Run:
+
+```sh
+CGO_ENABLED=0 go test ./gost28147imit/
 ```
 
 
@@ -768,24 +621,26 @@ go test -tags gost -fuzz=FuzzIMITConformance -fuzztime=30s ./yourpkg/
 
 **Key source citations**
 
-- `third_party/gogost/gost28147/mac.go:22-99` — `SeqMAC`, `NewMAC`, MAC
-  chaining `Write`, destructive `Sum`. (gogost, GPL-3.0 — describe, do not
-  copy.)
-- `internal/gost/primitives_gost.go:394-489` — `cryptoProKeyMeshingKey`
-  constant and `GOST28147_IMIT` (one-shot with meshing).
-- `internal/gost/exports_gost.go:98-107` — `GOST28147Cipher.SeqMACBlock`
-  (16-round single-block step, the gogost containment point).
-- `tls/internal/record/protection_gost.go:149-310` — `gostIMIT` streaming
-  driver: `macBlockEncrypt`, `meshKey`, `processBlockMesh`, `Write` (deferred
-  last block), `Finalize` (finalize-on-copy).
+- `gost28147imit/imit.go` — clean-room implementation in this package:
+  `cryptoProKeyMeshingKey` constant, `macCipher`, `macBlock`, `mesh`, `imit`,
+  `SeqMACBlock`, `IMIT`.
+- `gostcrypto/exports.go` — `GOST28147Cipher.SeqMACBlock` facade wrapper.
+- `gostcrypto/modes.go` — `GOST28147_IMIT` facade entry point.
+- `gostls/internal/record/protection_gost.go` — `gostIMIT` streaming driver:
+  `macBlockEncrypt`, `meshKey`, `Write` (deferred last block), `Finalize`
+  (finalize-on-copy).
+- `gostcrypto/keywrap/keywrap.go:imit4` — non-zero-IV IMIT for key transport.
 - `tmp/engine/gost89.c:240-245` — `CryptoProKeyMeshingKey` constant;
   `:644-684` `mac_block` (16-round, natural ordering); `:686-696` `get_mac`
   (bit-length truncation); `:750-766` `cryptopro_key_meshing`.
 - `tmp/engine/gost_crypt.c:1510-1524` — `mac_block_mesh` (1024-byte mesh +
   counter wrap); `:1526-1557` `gost_imit_update` (deferred last block,
   strict `> 8`); `:1559-1580` `gost_imit_final` (zero-prefix + zero-pad).
-- `internal/gost/primitives_engine_vectors_test.go:233-399` — ported
-  `test/02-mac.t` vectors and the two wrapper meshing tests (V1, V2).
-- `TODO.md:11` — the key-meshing divergence analysis (RESOLVED).
+- `tmp/engine/test/02-mac.t` — engine KAT vectors (V1, V2, V4).
+- `tmp/engine/tcl_tests/mac.try` — tcl-driven engine vectors.
+- `../gostcrypto-compat/parity/gost28147imit/` — parity tests (gogost oracle
+  differential + fuzz).
+- `TODO.md` — known divergences: key-meshing (resolved), empty-message behavior
+  (divergence; see imit.go comment at IMIT/empty check).
 - `CLAUDE.md` — "GOST IMIT MAC — EVP streaming semantics" (D3/D4/D6 ground
   truth) and "gogost/v7 library gotchas" (destructive `Sum`).
