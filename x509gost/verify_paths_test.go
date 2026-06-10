@@ -509,3 +509,202 @@ func TestVerify_GOST_Intermediate(t *testing.T) {
 		t.Fatal("chain missing the intermediate unexpectedly verified")
 	}
 }
+
+// newGOST256CASignedBy builds a GOST-256 CA cert (BasicConstraints CA:TRUE +
+// keyCertSign) signed by the given parent CA. ext lets a caller add e.g. a
+// pathLenConstraint to the BasicConstraints. Returns a gostCA handle.
+func newGOST256CASignedBy(t *testing.T, cn string, parent *gostCA, ext extensionParams) *gostCA {
+	t.Helper()
+
+	priv, pub, err := buildTestKeypair256()
+	if err != nil {
+		t.Fatalf("CA keygen %s: %v", cn, err)
+	}
+
+	notBefore, notAfter := validityWindow()
+
+	ext.setBasicConstraints = true
+	ext.isCA = true
+	ext.keyUsageCertSign = true
+
+	extDER, err := buildExtensionsDER(ext)
+	if err != nil {
+		t.Fatalf("CA ext %s: %v", cn, err)
+	}
+
+	der, err := buildCertDER(buildParams{
+		sigAlgoOID:     OIDSignatureGOSTR341012_256,
+		pubKeyAlgoOID:  OIDPublicKeyGOSTR341012_256,
+		curveOID:       OIDParamCryptoProA,
+		privRaw:        priv,
+		pubRaw:         pub,
+		gostAlgo:       AlgoR341012_256,
+		notBefore:      notBefore,
+		notAfter:       notAfter,
+		commonName:     cn,
+		issuerCN:       parent.cn,
+		signerPriv:     parent.priv,
+		signerCurveOID: OIDParamCryptoProA,
+		extensionsDER:  extDER,
+	})
+	if err != nil {
+		t.Fatalf("CA buildCertDER %s: %v", cn, err)
+	}
+
+	cert, err := ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("CA ParseCertificate %s: %v", cn, err)
+	}
+
+	return &gostCA{cn: cn, priv: priv, cert: cert}
+}
+
+// TestVerify_GOST_PathLenConstraint pins R2-X509-01: a CA carrying
+// pathLenConstraint=0 must reject a chain that puts an intermediate below it.
+// Chain root -> A(pathLen=0) -> B(CA) -> leaf: A permits B to be signed but B
+// signing a further cert (leaf below B, below A) exceeds A's budget, so the
+// 4-cert chain must be rejected; a chain where A directly signs an end-entity
+// (no intermediate below A) still verifies.
+func TestVerify_GOST_PathLenConstraint(t *testing.T) {
+	t.Parallel()
+
+	root := newGOST256CA(t, "pathlen-root")
+	// A: pathLenConstraint=0 — may sign end-entities but no further CAs below it.
+	caA := newGOST256CASignedBy(t, "pathlen-A", root, extensionParams{setPathLen: true, pathLen: 0})
+	// B: an intermediate CA signed by A.
+	caB := newGOST256CASignedBy(t, "pathlen-B", caA, extensionParams{})
+	// leaf signed by B → chain [leaf, B, A, root]: one intermediate (B) below A.
+	leaf := buildGOST256Cert(t, "pathlen-leaf", caB, extensionParams{})
+
+	_, err := leaf.Verify(VerifyOptions{
+		GOSTRoots:         []*Certificate{root.cert},
+		GOSTIntermediates: []*Certificate{caA.cert, caB.cert},
+		CurrentTime:       time.Now(),
+	})
+	if err == nil {
+		t.Fatal("chain exceeding pathLenConstraint=0 unexpectedly verified")
+	}
+
+	// Sanity: A directly signing an end-entity (no intermediate below A) is
+	// within pathLen=0 and must verify.
+	directLeaf := buildGOST256Cert(t, "pathlen-direct-leaf", caA, extensionParams{})
+
+	chains, err := directLeaf.Verify(VerifyOptions{
+		GOSTRoots:         []*Certificate{root.cert},
+		GOSTIntermediates: []*Certificate{caA.cert},
+		CurrentTime:       time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("direct end-entity under pathLen=0 CA should verify: %v", err)
+	}
+
+	if len(chains) != 1 || len(chains[0]) != 3 {
+		t.Fatalf("want one chain of length 3 (leaf,A,root), got %d chains", len(chains))
+	}
+}
+
+// TestVerify_GOST_UnhandledCriticalExtension pins R2-X509-01: a cert in the
+// chain carrying an unrecognized critical extension must be rejected (RFC 5280
+// §4.2 MUST-reject), even though it parses and chains otherwise.
+func TestVerify_GOST_UnhandledCriticalExtension(t *testing.T) {
+	t.Parallel()
+
+	ca := newGOST256CA(t, "critext-ca")
+	// An arbitrary OID not recognized by the stdlib parser, marked critical.
+	leaf := buildGOST256Cert(t, "critext-leaf", ca, extensionParams{
+		unknownCriticalOID: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 1},
+	})
+
+	// Guard: the unknown critical extension must actually have landed in the
+	// stdlib UnhandledCriticalExtensions set, else this test is vacuous.
+	if len(leaf.Stdlib.UnhandledCriticalExtensions) == 0 {
+		t.Fatal("test setup: expected an unhandled critical extension on the leaf")
+	}
+
+	_, err := leaf.Verify(VerifyOptions{
+		GOSTRoots:   []*Certificate{ca.cert},
+		CurrentTime: time.Now(),
+	})
+	if err == nil {
+		t.Fatal("cert with an unhandled critical extension unexpectedly verified")
+	}
+}
+
+// TestVerify_GOST_PoolLeafNotSelfSigned pins R2-X509-03: a non-self-signed
+// (cross-signed) GOST CA placed directly in GOSTRoots while also being the leaf
+// must still verify, provided a valid alternate signer is also in the pool. The
+// old code ran verifyGOSTSignature(leaf, leaf) on a pool match and aborted the
+// whole search on failure, so a cross-signed CA could not verify even with a
+// valid signer present. The fix falls through to the recursive search, which
+// finds the real signer in the pool.
+func TestVerify_GOST_PoolLeafNotSelfSigned(t *testing.T) {
+	t.Parallel()
+
+	// signer is a real CA; crossSigned is a CA cert signed BY signer (so its
+	// signature is NOT a valid self-signature). Both go in GOSTRoots; we verify
+	// crossSigned directly as the leaf. Under the old self-signature-on-pool-
+	// match check this aborted with a self-signed-sig-invalid error.
+	signer := newGOST256CA(t, "cross-signer")
+	crossSigned := newGOST256CASignedBy(t, "cross-signed-ca", signer, extensionParams{})
+
+	chains, err := crossSigned.cert.Verify(VerifyOptions{
+		GOSTRoots:   []*Certificate{crossSigned.cert, signer.cert},
+		CurrentTime: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("cross-signed CA in pool with a valid alternate signer should verify: %v", err)
+	}
+
+	if len(chains) != 1 || len(chains[0]) != 2 {
+		t.Fatalf("want one chain of length 2 (crossSigned, signer), got %d chains of len %d",
+			len(chains), chainLen(chains))
+	}
+}
+
+// chainLen returns the length of the first chain, or -1 if there are none (for
+// diagnostics only).
+func chainLen(chains [][]*Certificate) int {
+	if len(chains) == 0 {
+		return -1
+	}
+
+	return len(chains[0])
+}
+
+// TestVerify_GOST_LeafAnyEKU pins R2-X509-02: a leaf asserting
+// anyExtendedKeyUsage must satisfy a specific KeyUsages request (it is valid
+// for any purpose), instead of being falsely rejected.
+func TestVerify_GOST_LeafAnyEKU(t *testing.T) {
+	t.Parallel()
+
+	ca := newGOST256CA(t, "anyeku-ca")
+	// anyExtendedKeyUsage OID 2.5.29.37.0.
+	anyEKU := asn1.ObjectIdentifier{2, 5, 29, 37, 0}
+	leaf := buildGOST256Cert(t, "anyeku-leaf", ca, extensionParams{
+		ekuOIDs: []asn1.ObjectIdentifier{anyEKU},
+	})
+
+	// Guard: the leaf must actually carry ExtKeyUsageAny, else the test is vacuous.
+	if !sliceContainsAny(leaf.Stdlib.ExtKeyUsage) {
+		t.Fatal("test setup: expected leaf to assert ExtKeyUsageAny")
+	}
+
+	if _, err := leaf.Verify(VerifyOptions{
+		GOSTRoots:   []*Certificate{ca.cert},
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		CurrentTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("leaf asserting anyExtendedKeyUsage should satisfy a ServerAuth request: %v", err)
+	}
+}
+
+// sliceContainsAny reports whether ekus contains x509.ExtKeyUsageAny.
+func sliceContainsAny(ekus []x509.ExtKeyUsage) bool {
+	for _, e := range ekus {
+		if e == x509.ExtKeyUsageAny {
+			return true
+		}
+	}
+
+	return false
+}
