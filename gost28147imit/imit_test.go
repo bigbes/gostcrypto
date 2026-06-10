@@ -227,17 +227,18 @@ func TestSeqMACBlock_StreamingMatchesIMIT(t *testing.T) {
 	}
 }
 
-// TestIMIT_TC26Z_1024B_Meshing ports the engine's gost-mac-12 vector
-// (GOST-16): tc26-Z S-box + CryptoPro key meshing over 1024 bytes.
+// TestIMIT_TC26Z_1024B_NoMesh ports the engine's gost-mac-12 vector
+// (GOST-16): tc26-Z S-box over 1024 bytes.
 // Source: tmp/engine/test/02-mac.t:190-194 (key "0123456789abcdef" x 2 ASCII,
 // message = "12345670" x 128 = 1024 bytes, paramset tc26-Z = gost-mac-12).
 // Full 8-byte tag: be4453ec1ec327be; 4-byte prefix: be4453ec.
 //
-// This is the only tc26-Z + meshing coverage point in the module. The sbox-
-// parameterized internal imit() is the designed reference for both paramsets;
-// tc26-Z meshing exercised here catches bugs in mesh()'s cipher re-keying when
-// the S-box is not CryptoPro-A.
-func TestIMIT_TC26Z_1024B_Meshing(t *testing.T) {
+// NOTE: 1024 bytes is the LARGEST meshing-free tc26-Z input (guide V1).
+// The IMIT loop defers the trailing 1–8 bytes (strict "> 8"), so 127 blocks
+// run in the main loop and the 128th runs at finalization; count advances
+// 0, 8, …, 1016 — the mesh check (count == 1024) is never reached.
+// For actual mesh() coverage under tc26-Z see TestIMIT_TC26Z_1032B_Mesh.
+func TestIMIT_TC26Z_1024B_NoMesh(t *testing.T) {
 	t.Parallel()
 
 	key := imitKey
@@ -256,6 +257,44 @@ func TestIMIT_TC26Z_1024B_Meshing(t *testing.T) {
 
 	if !bytes.Equal(got[:4], wantTLS) {
 		t.Fatalf("imit(tc26-Z, 1024B)[:4] = %x, want %x", got[:4], wantTLS)
+	}
+}
+
+// TestIMIT_TC26Z_1032B_Mesh pins a tc26-Z MAC over 1032 bytes (129 blocks of
+// "12345670"), so that mesh() fires exactly once (count reaches 1024 before
+// the 129th block) under the tc26-Z S-box. This is the primary tc26-Z +
+// meshing coverage point: a regression in macCipher.mesh() that hardcodes
+// CryptoPro-A for the ECB-decrypt step would produce a wrong tag here.
+//
+// External reference (gost-engine v3.0.3, 2026-06-10):
+//
+//	python3 -c "import sys; sys.stdout.buffer.write(b'12345670' * 129)" > /tmp/imit_tc26z_1032.bin
+//	OPENSSL_CONF=/opt/homebrew/etc/gost/gost-engine.cnf \
+//	/opt/homebrew/opt/openssl@3/bin/openssl dgst -engine gost \
+//	  -mac gost-mac-12 \
+//	  -macopt key:0123456789abcdef0123456789abcdef \
+//	  -sigopt size:8 \
+//	  /tmp/imit_tc26z_1032.bin
+//	# => GOST-MAC-12-gost-mac-12(/tmp/imit_tc26z_1032.bin)= d498623c81b21a86
+func TestIMIT_TC26Z_1032B_Mesh(t *testing.T) {
+	t.Parallel()
+
+	key := imitKey
+	msg := []byte(strings.Repeat("12345670", 129)) // 1032 bytes: mesh() fires once.
+
+	// Full 8-byte tag via internal imit() with tc26-Z S-box.
+	// Source: gost-engine v3.0.3 gost-mac-12 CLI oracle, 2026-06-10 (see above).
+	wantFull := mustHex(t, "d498623c81b21a86")
+	wantTLS := wantFull[:4] // "d498623c"
+
+	got := imit(key, msg, gost28147.SboxTC26Z)
+
+	if !bytes.Equal(got, wantFull) {
+		t.Fatalf("imit(tc26-Z, 1032B) = %x, want %x", got, wantFull)
+	}
+
+	if !bytes.Equal(got[:4], wantTLS) {
+		t.Fatalf("imit(tc26-Z, 1032B)[:4] = %x, want %x", got[:4], wantTLS)
 	}
 }
 

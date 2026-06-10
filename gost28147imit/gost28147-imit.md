@@ -448,7 +448,7 @@ The 5-byte and 8-byte rows exercise the engine's *trailing* all-zero block
 (§2.1 rule 3, D5); the 16-byte case (two full blocks) does not. Pinned by
 `TestIMIT_GuideVectors/V3_*`.
 
-### V4. tc26-Z, 1024 bytes (engine gost-mac-12)
+### V4. tc26-Z, 1024 bytes, NO meshing (engine gost-mac-12)
 
 ```
 S-box:       tc26-Z (id-tc26-gost-28147-param-Z)
@@ -459,10 +459,41 @@ full IMIT-8 tag:   be4453ec1ec327be
 ```
 
 Source: `tmp/engine/test/02-mac.t:190-194` (gost-mac-12, testdata.dat).
-Pinned by `TestIMIT_TC26Z_1024B_Meshing` in `gost28147imit/imit_test.go`.
+Pinned by `TestIMIT_TC26Z_1024B_NoMesh` in `gost28147imit/imit_test.go`.
+1024 bytes is the **largest meshing-free** tc26-Z input: the IMIT loop defers
+the trailing 1–8 bytes (strict `> 8`), so 127 blocks run in the main loop and
+the 128th at finalization; `count` advances 0, 8, …, 1016, and the
+`count == 1024` mesh check is never reached. See V4b for the actual tc26-Z
+meshing vector.
+
+### V4b. tc26-Z, 1032 bytes, mesh() fires once (gost-engine CLI)
+
+```
+S-box:       tc26-Z (id-tc26-gost-28147-param-Z)
+key  (32B, ASCII): "0123456789abcdef0123456789abcdef"
+message:           "12345670" repeated 129 times  (1032 bytes)
+IMIT-4 tag:        d498623c
+full IMIT-8 tag:   d498623c81b21a86
+```
+
+External reference (gost-engine v3.0.3, 2026-06-10):
+
+```sh
+python3 -c "import sys; sys.stdout.buffer.write(b'12345670' * 129)" > /tmp/imit_tc26z_1032.bin
+OPENSSL_CONF=/opt/homebrew/etc/gost/gost-engine.cnf \
+/opt/homebrew/opt/openssl@3/bin/openssl dgst -engine gost \
+  -mac gost-mac-12 \
+  -macopt key:0123456789abcdef0123456789abcdef \
+  -sigopt size:8 \
+  /tmp/imit_tc26z_1032.bin
+# => GOST-MAC-12-gost-mac-12(/tmp/imit_tc26z_1032.bin)= d498623c81b21a86
+```
+
+Pinned by `TestIMIT_TC26Z_1032B_Mesh` in `gost28147imit/imit_test.go`.
 This is the primary tc26-Z + meshing coverage point: a regression in
 `macCipher.mesh()` that hardcodes CryptoPro-A for the ECB-decrypt step would
-only be caught here.
+produce a wrong tag here (the wrong tag would match the CryptoPro-A-meshed
+result, not `d498623c81b21a86`).
 
 ### V5. SeqMACBlock step-1 raw chaining state
 
@@ -575,7 +606,8 @@ The unit tests in this package (`gost28147imit/imit_test.go`,
 
 - `TestIMIT_GuideVectors` — V1, V2, V3 vectors (CryptoPro-A, various lengths)
 - `TestIMIT_EngineTclVectors` — ported `tmp/engine/tcl_tests/mac.try` vectors
-- `TestIMIT_TC26Z_1024B_Meshing` — tc26-Z + meshing (V4)
+- `TestIMIT_TC26Z_1024B_NoMesh` — tc26-Z, largest meshing-free input (V4)
+- `TestIMIT_TC26Z_1032B_Mesh` — tc26-Z, mesh() fires once (V4b)
 - `TestSeqMACBlock_GuideStep1KAT` — raw chaining state for one block (V5)
 - `TestSeqMACBlock_StreamingMatchesIMIT` — streaming SeqMACBlock driver agrees
   with one-shot IMIT
