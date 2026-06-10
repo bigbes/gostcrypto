@@ -25,7 +25,7 @@ import (
 )
 
 // errUnknownCurveOID is returned by CurveByOID for an OID arc that is not one
-// of the eleven supported parameter sets.
+// of the ten supported parameter sets.
 var errUnknownCurveOID = errors.New("gost3410curves: unknown curve OID")
 
 const (
@@ -52,14 +52,23 @@ const (
 //
 // over the prime field GF(P), with a base point (X, Y) generating a cyclic
 // subgroup of prime order Q.
+//
+// Cofactor is the cofactor h of the curve (i.e. #E(GF(P)) = h·Q).
+// For every registered CryptoPro/TC26 parameter set Cofactor is either 1 or 4:
+//   - Cofactor == 1 for all CryptoPro-A/B/C sets and for tc26-512-A/B.
+//   - Cofactor == 4 for tc26-256-A and tc26-512-C (twisted-Edwards derived).
+//
+// The (e,d) pair of the Twisted-Edwards representation is omitted since
+// signature/VKO never require it.
 type Curve struct {
-	P    *big.Int // field characteristic (prime).
-	A    *big.Int // Weierstrass coefficient a.
-	B    *big.Int // Weierstrass coefficient b.
-	Q    *big.Int // order of the base-point subgroup (prime).
-	X    *big.Int // base-point affine X.
-	Y    *big.Int // base-point affine Y.
-	Name string
+	P        *big.Int // field characteristic (prime).
+	A        *big.Int // Weierstrass coefficient a.
+	B        *big.Int // Weierstrass coefficient b.
+	Q        *big.Int // order of the base-point subgroup (prime).
+	X        *big.Int // base-point affine X.
+	Y        *big.Int // base-point affine Y.
+	Name     string
+	Cofactor int // cofactor h: #E = h·Q; always 1 or 4 for registered sets.
 }
 
 // Point is an affine curve point. The identity (point at infinity) is
@@ -114,52 +123,62 @@ func (c *Curve) PointSize() int {
 // CryptoPro-A (= tc26-256-B), co = 1, Weierstrass.
 func curveCryptoProA() *Curve {
 	return &Curve{
-		P:    hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD97"),
-		A:    hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD94"),
-		B:    hexInt("00000000000000000000000000000000000000000000000000000000000000A6"),
-		Q:    hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF6C611070995AD10045841B09B761B893"),
-		X:    hexInt("0000000000000000000000000000000000000000000000000000000000000001"),
-		Y:    hexInt("8D91E471E0989CDA27DF505A453F2B7635294F2DDF23E3B122ACC99C9E9F1E14"),
-		Name: "id-GostR3410-2001-CryptoPro-A-ParamSet",
+		P:        hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD97"),
+		A:        hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD94"),
+		B:        hexInt("00000000000000000000000000000000000000000000000000000000000000A6"),
+		Q:        hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF6C611070995AD10045841B09B761B893"),
+		X:        hexInt("0000000000000000000000000000000000000000000000000000000000000001"),
+		Y:        hexInt("8D91E471E0989CDA27DF505A453F2B7635294F2DDF23E3B122ACC99C9E9F1E14"),
+		Name:     "id-GostR3410-2001-CryptoPro-A-ParamSet",
+		Cofactor: 1,
 	}
 }
 
 // CryptoPro-B (= tc26-256-C), co = 1, Weierstrass.
 func curveCryptoProB() *Curve {
 	return &Curve{
-		P:    hexInt("8000000000000000000000000000000000000000000000000000000000000C99"),
-		A:    hexInt("8000000000000000000000000000000000000000000000000000000000000C96"),
-		B:    hexInt("3E1AF419A269A5F866A7D3C25C3DF80AE979259373FF2B182F49D4CE7E1BBC8B"),
-		Q:    hexInt("800000000000000000000000000000015F700CFFF1A624E5E497161BCC8A198F"),
-		X:    hexInt("0000000000000000000000000000000000000000000000000000000000000001"),
-		Y:    hexInt("3FA8124359F96680B83D1C3EB2C070E5C545C9858D03ECFB744BF8D717717EFC"),
-		Name: "id-GostR3410-2001-CryptoPro-B-ParamSet",
+		P:        hexInt("8000000000000000000000000000000000000000000000000000000000000C99"),
+		A:        hexInt("8000000000000000000000000000000000000000000000000000000000000C96"),
+		B:        hexInt("3E1AF419A269A5F866A7D3C25C3DF80AE979259373FF2B182F49D4CE7E1BBC8B"),
+		Q:        hexInt("800000000000000000000000000000015F700CFFF1A624E5E497161BCC8A198F"),
+		X:        hexInt("0000000000000000000000000000000000000000000000000000000000000001"),
+		Y:        hexInt("3FA8124359F96680B83D1C3EB2C070E5C545C9858D03ECFB744BF8D717717EFC"),
+		Name:     "id-GostR3410-2001-CryptoPro-B-ParamSet",
+		Cofactor: 1,
 	}
 }
 
-// CryptoPro-C (= tc26-256-D), co = 4, Weierstrass.
+// CryptoPro-C (= tc26-256-D), co = 1, Weierstrass.
+// NOTE: the stored Q is the full group order (same bit-length as P), so the
+// cofactor is 1. An earlier comment in this file incorrectly said "co = 4" —
+// that is mathematically impossible for this curve (4·Q would exceed the
+// Hasse bound p+1±2√p). VKO also assigns cofactor 1 here; see vko.go and
+// the VKO-63 finding for the analysis.
 func curveCryptoProC() *Curve {
 	return &Curve{
-		P:    hexInt("9B9F605F5A858107AB1EC85E6B41C8AACF846E86789051D37998F7B9022D759B"),
-		A:    hexInt("9B9F605F5A858107AB1EC85E6B41C8AACF846E86789051D37998F7B9022D7598"),
-		B:    hexInt("000000000000000000000000000000000000000000000000000000000000805A"),
-		Q:    hexInt("9B9F605F5A858107AB1EC85E6B41C8AA582CA3511EDDFB74F02F3A6598980BB9"),
-		X:    hexInt("0000000000000000000000000000000000000000000000000000000000000000"),
-		Y:    hexInt("41ECE55743711A8C3CBF3783CD08C0EE4D4DC440D4641A8F366E550DFDB3BB67"),
-		Name: "id-GostR3410-2001-CryptoPro-C-ParamSet",
+		P:        hexInt("9B9F605F5A858107AB1EC85E6B41C8AACF846E86789051D37998F7B9022D759B"),
+		A:        hexInt("9B9F605F5A858107AB1EC85E6B41C8AACF846E86789051D37998F7B9022D7598"),
+		B:        hexInt("000000000000000000000000000000000000000000000000000000000000805A"),
+		Q:        hexInt("9B9F605F5A858107AB1EC85E6B41C8AA582CA3511EDDFB74F02F3A6598980BB9"),
+		X:        hexInt("0000000000000000000000000000000000000000000000000000000000000000"),
+		Y:        hexInt("41ECE55743711A8C3CBF3783CD08C0EE4D4DC440D4641A8F366E550DFDB3BB67"),
+		Name:     "id-GostR3410-2001-CryptoPro-C-ParamSet",
+		Cofactor: 1,
 	}
 }
 
 // tc26-256-A, co = 4, twisted Edwards (stored as Weierstrass).
+// Q is the prime subgroup order (= m/4); the full group order is 4·Q.
 func curveTc26256A() *Curve {
 	return &Curve{
-		P:    hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD97"),
-		A:    hexInt("C2173F1513981673AF4892C23035A27CE25E2013BF95AA33B22C656F277E7335"),
-		B:    hexInt("295F9BAE7428ED9CCC20E7C359A9D41A22FCCD9108E17BF7BA9337A6F8AE9513"),
-		Q:    hexInt("400000000000000000000000000000000FD8CDDFC87B6635C115AF556C360C67"),
-		X:    hexInt("91E38443A5E82C0D880923425712B2BB658B9196932E02C78B2582FE742DAA28"),
-		Y:    hexInt("32879423AB1A0375895786C4BB46E9565FDE0B5344766740AF268ADB32322E5C"),
-		Name: "id-tc26-gost-3410-12-256-paramSetA",
+		P:        hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD97"),
+		A:        hexInt("C2173F1513981673AF4892C23035A27CE25E2013BF95AA33B22C656F277E7335"),
+		B:        hexInt("295F9BAE7428ED9CCC20E7C359A9D41A22FCCD9108E17BF7BA9337A6F8AE9513"),
+		Q:        hexInt("400000000000000000000000000000000FD8CDDFC87B6635C115AF556C360C67"),
+		X:        hexInt("91E38443A5E82C0D880923425712B2BB658B9196932E02C78B2582FE742DAA28"),
+		Y:        hexInt("32879423AB1A0375895786C4BB46E9565FDE0B5344766740AF268ADB32322E5C"),
+		Name:     "id-tc26-gost-3410-12-256-paramSetA",
+		Cofactor: 4,
 	}
 }
 
@@ -178,7 +197,8 @@ func curveTc26512A() *Curve {
 			"0000000000000000000000000000000000000000000000000000000000000003"),
 		Y: hexInt("7503CFE87A836AE3A61B8816E25450E6CE5E1C93ACF1ABC1778064FDCBEFA921" +
 			"DF1626BE4FD036E93D75E6A50E3A41E98028FE5FC235F5B889A589CB5215F2A4"),
-		Name: "id-tc26-gost-3410-12-512-paramSetA",
+		Name:     "id-tc26-gost-3410-12-512-paramSetA",
+		Cofactor: 1,
 	}
 }
 
@@ -197,11 +217,13 @@ func curveTc26512B() *Curve {
 			"0000000000000000000000000000000000000000000000000000000000000002"),
 		Y: hexInt("1A8F7EDA389B094C2C071E3647A8940F3C123B697578C213BE6DD9E6C8EC7335" +
 			"DCB228FD1EDF4A39152CBCAAF8C0398828041055F94CEEEC7E21340780FE41BD"),
-		Name: "id-tc26-gost-3410-12-512-paramSetB",
+		Name:     "id-tc26-gost-3410-12-512-paramSetB",
+		Cofactor: 1,
 	}
 }
 
 // tc26-512-C, co = 4, twisted Edwards (stored as Weierstrass).
+// Q is the prime subgroup order (= m/4); the full group order is 4·Q.
 func curveTc26512C() *Curve {
 	return &Curve{
 		P: hexInt("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" +
@@ -218,11 +240,12 @@ func curveTc26512C() *Curve {
 			"A27272A7AE602BF2A7B9033DB9ED3610C6FB85487EAE97AAC5BC7928C1950148"),
 		Y: hexInt("F5CE40D95B5EB899ABBCCFF5911CB8577939804D6527378B8C108C3D2090FF9B" +
 			"E18E2D33E3021ED2EF32D85822423B6304F726AA854BAE07D0396E9A9ADDC40F"),
-		Name: "id-tc26-gost-3410-12-512-paramSetC",
+		Name:     "id-tc26-gost-3410-12-512-paramSetC",
+		Cofactor: 4,
 	}
 }
 
-// CurveByOID resolves one of the eleven supported OID arcs (dotted-decimal
+// CurveByOID resolves one of the ten supported OID arcs (dotted-decimal
 // string) to its parameter set. The 2001 CryptoPro 256-bit sets are identical
 // curves to three of the tc26 2012 256-bit sets (§3.4), so those arcs share
 // constants but each returns a fresh *Curve.
@@ -309,6 +332,12 @@ func (c *Curve) IsOnCurve(p Point) bool {
 }
 
 // Add returns p + q on the curve (affine short-Weierstrass addition).
+//
+// Precondition: both p and q must be either the point at infinity (nil, nil)
+// or reduced, on-curve points (0 ≤ X, Y < P, y²≡x³+ax+b mod P). Passing
+// unreduced or off-curve coordinates yields a silently garbage result — the
+// arithmetic does not detect the violation. Callers with untrusted input must
+// gate with IsOnCurve before calling Add.
 func (c *Curve) Add(p, q Point) Point {
 	if p.IsInfinity() {
 		return clonePoint(q)
@@ -347,6 +376,9 @@ func (c *Curve) Add(p, q Point) Point {
 }
 
 // Double returns 2·p on the curve.
+//
+// Precondition: p must be the point at infinity or a reduced, on-curve point.
+// See Add for the garbage-in/garbage-out hazard and the IsOnCurve gate.
 func (c *Curve) Double(p Point) Point {
 	if p.IsInfinity() {
 		return Point{}
@@ -386,6 +418,10 @@ func (c *Curve) Double(p Point) Point {
 //
 // k is not reduced (the caller's responsibility). k <= 0 returns the identity;
 // this is a guard, not a definition — callers pass k in [1, Q-1].
+//
+// Precondition: p must be a reduced, on-curve point (or the identity). Passing
+// an off-curve point silently multiplies on the attacker's curve (invalid-curve
+// attack shape). Callers with untrusted input must gate with IsOnCurve; see Add.
 func (c *Curve) ScalarMult(k *big.Int, p Point) Point {
 	if k == nil || k.Sign() <= 0 || p.IsInfinity() {
 		return Point{}
