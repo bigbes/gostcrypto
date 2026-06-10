@@ -1495,6 +1495,7 @@ func TestFacade_GenerateEphemeralKey_LEqInput(t *testing.T) {
 
 	// Normal path is unaffected: a non-degenerate draw still succeeds.
 	good := make([]byte, c.PointSize())
+
 	good[0] = 0x42
 
 	gPriv, gPub, err := GenerateEphemeralKey(c, bytes.NewReader(good))

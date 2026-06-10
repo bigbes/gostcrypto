@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"math/big"
+	"slices"
 	"testing"
 	"time"
 )
@@ -700,11 +701,5 @@ func TestVerify_GOST_LeafAnyEKU(t *testing.T) {
 
 // sliceContainsAny reports whether ekus contains x509.ExtKeyUsageAny.
 func sliceContainsAny(ekus []x509.ExtKeyUsage) bool {
-	for _, e := range ekus {
-		if e == x509.ExtKeyUsageAny {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(ekus, x509.ExtKeyUsageAny)
 }
