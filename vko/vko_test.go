@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"hash"
 	"testing"
 
@@ -431,6 +432,149 @@ func TestKAT_Engine04PkeyDerive(t *testing.T) {
 						t.Errorf("%s vs Malice: derive succeeded, want error", side.who)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestCofactorReject verifies that a caller-supplied curve whose Cofactor is
+// not 1 or 4 causes KEK2012256 to return errUnsupportedCofactor rather than
+// silently computing a wrong KEK (R2-VKO-01).
+func TestCofactorReject(t *testing.T) {
+	t.Parallel()
+
+	// Build a minimal syntactically-valid curve with an unsupported cofactor.
+	// We borrow the 2001-TestParamSet constants (Cofactor 1 in production) and
+	// override Cofactor to 2, 0, and 8 in turn. The override must be caught
+	// before any scalar-multiplication, so we only need a structurally valid curve
+	// — the KEK computation must not return (result, nil).
+	base := curve2001Test()
+
+	for _, badCofactor := range []int{0, 2, 8} {
+		c := *base // shallow copy; arithmetic fields are *big.Int (shared, read-only here).
+
+		c.Cofactor = badCofactor
+
+		// Any syntactically valid key material will do; reuse the KAT#1 scalars.
+		d1 := mustHex(t, "1df129e43dab345b68f6a852f4162dc69f36b2f84717d08755cc5c44150bf928")
+		d2 := mustHex(t, "5b9356c6474f913f1e83885ea0edd5df1a43fd9d799d219093241157ac9ed473")
+		ukm := mustHex(t, "5172be25f852a233")
+
+		q2 := deriveQ(t, base, d2) // derive on original curve (cofactor 1).
+
+		_, err := KEK2012256(&c, d1, q2, ukm)
+		if err == nil {
+			t.Errorf("Cofactor=%d: expected error, got nil", badCofactor)
+
+			continue
+		}
+
+		if !errors.Is(err, errUnsupportedCofactor) {
+			t.Errorf("Cofactor=%d: got %v, want errUnsupportedCofactor", badCofactor, err)
+		}
+	}
+}
+
+// TestCofactorRegression is a regression guard verifying that the cofactor-1
+// and cofactor-4 paths still produce exactly the same KEK bytes after the
+// R2-VKO-01 hardening change. It re-runs representative rows from
+// TestKAT_Engine04PkeyDerive (one cofactor-1 curve, two cofactor-4 curves)
+// and asserts the shared key SHA-256 is byte-for-byte unchanged.
+func TestCofactorRegression(t *testing.T) {
+	t.Parallel()
+
+	ukm := mustHex(t, "0100000000000000")
+	getCurve := func(oid string) *gost3410curves.Curve {
+		c, err := gost3410curves.CurveByOID(oid)
+		if err != nil {
+			t.Fatalf("CurveByOID(%s): %v", oid, err)
+		}
+
+		return c
+	}
+
+	type row struct {
+		name       string
+		c          *gost3410curves.Curve
+		kek        func(c *gost3410curves.Curve, prv, pub, ukm []byte) ([]byte, error)
+		alicePrv   string
+		bobPrv     string
+		secretHash string // SHA-256 of KEK, pinned from TestKAT_Engine04PkeyDerive.
+	}
+
+	rows := []row{
+		{
+			// cofactor 1 — CryptoPro-C (tc26-256-D) — guards the h=1 path.
+			// Vectors: 04-pkey.t:192-201.
+			name:       "CryptoPro-C/cofactor-1",
+			c:          getCurve("1.2.643.2.2.35.3"),
+			kek:        KEK2001,
+			alicePrv:   "3518d13a65b308efc78d8df6b9b3520977a309457824c9bae862c4fb06142511",
+			bobPrv:     "67e0a6a5840afd4ea6e6772f8ab8660a661934b4f0dc0f5a0088a3ad4e6a5320",
+			secretHash: "d61f1f55a1ad012884b969dbe2550f38f2356a029e5d8af07d50d10ca9812c58",
+		},
+		{
+			// cofactor 4 — tc26-256-A — guards the h=4 path for 256-bit curves.
+			// Vectors: 04-pkey.t:222-234.
+			name:       "tc26-256-A/cofactor-4",
+			c:          getCurve("1.2.643.7.1.2.1.1.1"),
+			kek:        KEK2012256,
+			alicePrv:   "f9faed9e6d8c10f620d85879a27f85de1a08f63a28c9baae18b1b4cda07dfe07",
+			bobPrv:     "d5c1776fab5cdd0419b35631b558e05047f764c02cc5e8a48889591f4150ac2a",
+			secretHash: "e9f7c57547fa0cd3c9942c62f9c74a553626d5f9810975a476825cd6f22a4e86",
+		},
+		{
+			// cofactor 4 — tc26-512-C — guards the h=4 path for 512-bit curves.
+			// Vectors: 04-pkey.t:285-297.
+			name: "tc26-512-C/cofactor-4",
+			c:    getCurve("1.2.643.7.1.2.1.2.3"),
+			kek:  KEK2012256,
+			alicePrv: "3bf45296ecca85e2940926fa4084a77d624c2c15707371a52162ddcdd4ab8957" +
+				"a9f9689e3e91a25fb93dd86e1b70596ccd22c21d5d46516811063b6704c32b1a",
+			bobPrv: "2208d35000c9eeaf8106f1e483a6be568c96a81eab92b0adf0c9d0ab18cdc275" +
+				"b69ad248ae8f99b4331d7a568c3b030bc6d83be52892fc1e0c2e06a5a50da61a",
+			secretHash: "2df0dfa8d437689d41fad965f13ea28ce27c29dd84514b376ea6ad9f0c7e3ece",
+		},
+	}
+
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+
+			alicePrv := mustHex(t, r.alicePrv)
+			bobPrv := mustHex(t, r.bobPrv)
+
+			alicePub, err := DeriveQLE(r.c, alicePrv)
+			if err != nil {
+				t.Fatalf("DeriveQLE(alice): %v", err)
+			}
+
+			bobPub, err := DeriveQLE(r.c, bobPrv)
+			if err != nil {
+				t.Fatalf("DeriveQLE(bob): %v", err)
+			}
+
+			kekHashHex := func(kekBytes []byte) string {
+				h := sha256.Sum256(kekBytes)
+				return hex.EncodeToString(h[:])
+			}
+
+			got, err := r.kek(r.c, alicePrv, bobPub, ukm)
+			if err != nil {
+				t.Fatalf("alice KEK: %v", err)
+			}
+
+			if kekHashHex(got) != r.secretHash {
+				t.Errorf("alice KEK hash = %s, want %s", kekHashHex(got), r.secretHash)
+			}
+
+			got, err = r.kek(r.c, bobPrv, alicePub, ukm)
+			if err != nil {
+				t.Fatalf("bob KEK: %v", err)
+			}
+
+			if kekHashHex(got) != r.secretHash {
+				t.Errorf("bob KEK hash = %s, want %s", kekHashHex(got), r.secretHash)
 			}
 		})
 	}

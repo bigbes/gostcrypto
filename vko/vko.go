@@ -20,6 +20,7 @@ package vko
 
 import (
 	"errors"
+	"fmt"
 	"hash"
 	"math/big"
 
@@ -77,13 +78,14 @@ func big2leFixed(n *big.Int, size int) []byte {
 // ---------------------------------------------------------------------------.
 
 var (
-	errZeroPrivate = errors.New("vko: private key is zero mod q")
-	errBadPubLen   = errors.New("vko: public key has wrong length")
-	errBadPrivLen  = errors.New("vko: private key has wrong length")
-	errZeroUKM     = errors.New("vko: UKM is zero")
-	errPubNotOn    = errors.New("vko: public point is not on the curve")
-	errIdentity    = errors.New("vko: agreement point is the identity")
-	errDerivedID   = errors.New("vko: derived public point is the identity")
+	errZeroPrivate         = errors.New("vko: private key is zero mod q")
+	errBadPubLen           = errors.New("vko: public key has wrong length")
+	errBadPrivLen          = errors.New("vko: private key has wrong length")
+	errZeroUKM             = errors.New("vko: UKM is zero")
+	errPubNotOn            = errors.New("vko: public point is not on the curve")
+	errIdentity            = errors.New("vko: agreement point is the identity")
+	errDerivedID           = errors.New("vko: derived public point is the identity")
+	errUnsupportedCofactor = errors.New("vko: unsupported cofactor (only 1 and 4 are valid for GOST curves)")
 )
 
 // loadPrivateLE reverses a little-endian scalar, rejects zero, and reduces it
@@ -131,15 +133,20 @@ func loadPublicLE(c *gost3410curves.Curve, raw []byte) (gost3410curves.Point, er
 // Cofactors (guide D2). The curves package now carries a Cofactor field, so the
 // VKO layer reads it directly. All CryptoPro paramsets and tc26-512-A/B have
 // Cofactor==1; tc26-256-A and tc26-512-C have Cofactor==4 (twisted-Edwards
-// derived). A zero Cofactor (hand-built curve) is treated as 1 for safety.
+// derived). No registered GOST curve has a cofactor other than 1 or 4; a
+// caller-supplied curve with any other cofactor value is rejected to prevent
+// silent production of a wrong KEK.
 // ---------------------------------------------------------------------------.
 
-func cofactor(c *gost3410curves.Curve) *big.Int {
-	if c.Cofactor == cofactor4 {
-		return big.NewInt(cofactor4)
+func cofactor(c *gost3410curves.Curve) (*big.Int, error) {
+	switch c.Cofactor {
+	case cofactor4:
+		return big.NewInt(cofactor4), nil
+	case 1:
+		return big.NewInt(1), nil
+	default:
+		return nil, fmt.Errorf("%w: %d", errUnsupportedCofactor, c.Cofactor)
 	}
-
-	return big.NewInt(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +177,11 @@ func agreementRaw(c *gost3410curves.Curve, d, ukm *big.Int, q gost3410curves.Poi
 
 	// u = UKM · cofactor, reduced mod fullGroupOrder = cofactor·q.
 	// The reduction is KEK-preserving: ord(K1) | cofactor·q.
-	cof := cofactor(c)
+	cof, err := cofactor(c)
+	if err != nil {
+		return nil, err
+	}
+
 	u := new(big.Int).Mul(ukm, cof)
 	fullOrder := new(big.Int).Mul(cof, c.Q)
 	u.Mod(u, fullOrder)

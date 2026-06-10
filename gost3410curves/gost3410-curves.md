@@ -141,9 +141,8 @@ x = 0000000000000000000000000000000000000000000000000000000000000001
 y = 3FA8124359F96680B83D1C3EB2C070E5C545C9858D03ECFB744BF8D717717EFC
 ```
 
-**CryptoPro-C** (= tc26-256-D), `co = 4`, Weierstrass
-(`params.go:270-318`; engine `gost_params.c:52-59` — note engine lists
-cofactor `1` here, see §3.5):
+**CryptoPro-C** (= tc26-256-D), `co = 1`, Weierstrass
+(`params.go:270-318`; engine `gost_params.c:52-59`):
 ```
 p = 9B9F605F5A858107AB1EC85E6B41C8AACF846E86789051D37998F7B9022D759B
 a = 9B9F605F5A858107AB1EC85E6B41C8AACF846E86789051D37998F7B9022D7598
@@ -321,19 +320,21 @@ following discrepancies are benign for the operations the repo performs, but a
 reimplementer who later adds subgroup-membership checks (cofactor clearing)
 must get them right:
 
-- **CryptoPro-C / tc26-256-D**: true curve order is `4·q` (cofactor 4). gogost
-  passes `co = nil` for tc26-256-D → defaults to **1** (`params.go:309`,
-  `curve.go:73`). The engine table also writes cofactor `"1"` for CryptoPro-C
-  (`gost_params.c:59`). Both are wrong against the standard's `4`, but
-  harmless here.
-- **tc26-256-A and tc26-512-C**: gogost passes `bigInt4`
-  (`params.go:164`, `603`), matching the standard. The engine writes `"4"` for
-  tc26-512-C (`gost_params.c:191`) and `"4"` for tc26-256-A
-  (`gost_params.c:102`). Consistent.
+- **CryptoPro-C / tc26-256-D**: cofactor is **1**. The stored `q` is the full
+  group order (same bit-length as `p`), so `#E = q` and `h = 1`. Cofactor 4 is
+  mathematically impossible here — `4·q` would exceed the Hasse bound
+  `p + 1 ± 2√p`. This is confirmed by gost-engine v3.0.3
+  `gost_params.c:52-59` (stores cofactor `"1"`) and by gogost, which defaults
+  to 1 when `co = nil` (`params.go:309`, `curve.go:73`). Both sources agree
+  and both are correct.
+- **tc26-256-A and tc26-512-C**: cofactor is **4** (twisted-Edwards derived).
+  gogost passes `bigInt4` (`params.go:164`, `603`), matching the standard.
+  The engine writes `"4"` for tc26-512-C (`gost_params.c:191`) and `"4"` for
+  tc26-256-A (`gost_params.c:102`). Consistent.
 
 Decision for a reimpl: store the **mathematically correct** cofactor (1 for
-A/B 512 and 256-B/C; 4 for 256-A, 256-D, 512-C, and CryptoPro-C), and never
-rely on gogost's `nil`-defaulted value for D.
+A/B 512 and all 256-B/C/D and CryptoPro-A/B/C sets; 4 for tc26-256-A and
+tc26-512-C). Never assign cofactor 4 to CryptoPro-C or tc26-256-D.
 
 ### 3.6 Engine table field order is `{a,b,p,q,x,y,cofactor}` — do not copy positionally
 
@@ -427,9 +428,9 @@ Each step is independently testable against a vector above.
    §4.1 on-curve check `y²≡x³+ax+b (mod p)` passes for all.
 3. **Implement `PointSize` from `p.BitLen()`** (32 if ≤256 else 64), not from
    the OID. *Test:* tc26-512-* report 64, others 32.
-4. **Set cofactors correctly** (§3.5): 4 for tc26-256-A, tc26-256-D,
-   tc26-512-C, CryptoPro-C; 1 otherwise. Do not inherit gogost's nil-default
-   for D. *Test:* assert `co` per set.
+4. **Set cofactors correctly** (§3.5): 4 for tc26-256-A and tc26-512-C
+   (twisted-Edwards derived); 1 for all other sets including CryptoPro-C and
+   tc26-256-D. *Test:* assert `co` per set.
 5. **Write `CurveByOID`** mirroring `primitives_gost.go:53-77`: a switch over
    the ten OIDs returning the right table, error on unknown. *Test:* feed
    each OID from `x509gost/oids.go:64-100`, expect the matching name; feed a
