@@ -116,6 +116,25 @@ func KeyWrapCryptoPro(sbox Sbox, kek, ukm, sessionKey []byte) ([]byte, error) {
 	return out, nil
 }
 
+// Diversify exposes the CryptoPro KEK diversification (RFC 4357 §6.5) so
+// callers that need the intermediate diversified key (e.g. test-vector
+// cross-checks) can compute it without re-implementing the eight CFB rounds.
+// It returns the 32-byte diversified key.
+//
+// kek must be exactly 32 bytes; ukm must be exactly 8 bytes. Violations panic
+// with a package-prefixed message.
+func Diversify(sbox Sbox, kek, ukm []byte) []byte {
+	if len(kek) != keySize {
+		panic("keywrap: kek must be 32 bytes")
+	}
+
+	if len(ukm) != ukmSize {
+		panic("keywrap: ukm must be 8 bytes")
+	}
+
+	return diversify(sbox, kek, ukm)
+}
+
 // diversify implements the CryptoPro KEK diversification algorithm
 // (RFC 4357 §6.5). Given the 32-byte KEK and 8-byte UKM it returns KEK(UKM).
 //
@@ -124,12 +143,6 @@ func KeyWrapCryptoPro(sbox Sbox, kek, ukm, sessionKey []byte) ([]byte, error) {
 // 1<<j, D2) routes w[j] into sum S1 (bit set) or S2 (bit clear); both sums are
 // uint32 and wrap mod 2^32 (D3). The 8-byte CFB IV is LE32(S1) || LE32(S2),
 // and the current key is CFB-encrypted under itself in place (self-keyed, D4).
-// Diversify exposes the CryptoPro KEK diversification (RFC 4357 §6.5) so
-// callers that need the intermediate diversified key (e.g. test-vector
-// cross-checks) can compute it without re-implementing the eight CFB rounds.
-// kek must be 32 bytes, ukm 8 bytes; it returns the 32-byte diversified key.
-func Diversify(sbox Sbox, kek, ukm []byte) []byte { return diversify(sbox, kek, ukm) }
-
 func diversify(sbox Sbox, kek, ukm []byte) []byte {
 	key := make([]byte, keySize)
 	copy(key, kek)
@@ -158,10 +171,10 @@ func diversify(sbox Sbox, kek, ukm []byte) []byte {
 	return key
 }
 
-// cfbEncrypt performs GOST 28147-89 CFB encryption of src into dst (which may
-// alias src), keyed with cipherKey, IV = iv. Matches gost_enc_cfb: for each
-// block, gamma = E(feedback); ct = pt XOR gamma; feedback = ct (D4). src must
-// be a whole number of 8-byte blocks (the diversification key is 32 bytes).
+// cfbEncrypt performs GOST 28147-89 CFB encryption of src in place, keyed with
+// cipherKey, IV = iv. Matches gost_enc_cfb: for each block, gamma = E(feedback);
+// ct = pt XOR gamma; feedback = ct (D4). src must be a whole number of 8-byte
+// blocks (the diversification key is 32 bytes).
 func cfbEncrypt(sbox Sbox, cipherKey, iv, src []byte) {
 	c := gost28147.NewCipher(cipherKey, sbox)
 
