@@ -281,9 +281,8 @@ func KeyWrapCryptoPro(sbox *Sbox, kek, ukm, sessionKey []byte) ([]byte, error) {
 }
 
 // keyDiversifyCryptoPro implements RFC 4357 §6.5 KEK diversification, retained
-// as a package-private helper so the backend-agnostic keywrap_vector_test.go
-// (which cross-checks the intermediate diversified key) builds against both
-// backends.
+// as a package-private helper so TestKeyWrapCryptoPro_KAT (facade_test.go) can
+// cross-check the intermediate diversified key independently of the full wrap.
 func keyDiversifyCryptoPro(sbox *Sbox, inputKey, ukm []byte) []byte {
 	return keywrap.Diversify(sbox.inner, inputKey, ukm)
 }

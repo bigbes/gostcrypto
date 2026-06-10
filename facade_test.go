@@ -24,12 +24,20 @@ func TestGost_Kuznyechik_Vector(t *testing.T) {
 	pt, _ := hex.DecodeString("1122334455667700ffeeddccbbaa9988")
 	wantCT, _ := hex.DecodeString("7f679d90bebc24305a468d42b9d4edcd")
 
-	dst := KuznyechikEncrypt(key, pt)
+	dst, err := KuznyechikEncrypt(key, pt)
+	if err != nil {
+		t.Fatalf("KuznyechikEncrypt: %v", err)
+	}
+
 	if !bytes.Equal(dst, wantCT) {
 		t.Fatalf("KuznyechikEncrypt: got %x, want %x", dst, wantCT)
 	}
 
-	got := KuznyechikDecrypt(key, dst)
+	got, err := KuznyechikDecrypt(key, dst)
+	if err != nil {
+		t.Fatalf("KuznyechikDecrypt: %v", err)
+	}
+
 	if !bytes.Equal(got, pt) {
 		t.Fatalf("KuznyechikDecrypt: got %x, want %x", got, pt)
 	}
@@ -46,12 +54,20 @@ func TestGost_Magma_Vector(t *testing.T) {
 	pt, _ := hex.DecodeString("fedcba9876543210")
 	wantCT, _ := hex.DecodeString("4ee901e5c2d8ca3d")
 
-	dst := MagmaEncrypt(key, pt)
+	dst, err := MagmaEncrypt(key, pt)
+	if err != nil {
+		t.Fatalf("MagmaEncrypt: %v", err)
+	}
+
 	if !bytes.Equal(dst, wantCT) {
 		t.Fatalf("MagmaEncrypt: got %x, want %x", dst, wantCT)
 	}
 
-	got := MagmaDecrypt(key, dst)
+	got, err := MagmaDecrypt(key, dst)
+	if err != nil {
+		t.Fatalf("MagmaDecrypt: %v", err)
+	}
+
 	if !bytes.Equal(got, pt) {
 		t.Fatalf("MagmaDecrypt: got %x, want %x", got, pt)
 	}
@@ -97,7 +113,8 @@ func TestGost_Streebog512_Vector(t *testing.T) {
 }
 
 // TestGost_R341012_Verify exercises signature verify (sign + verify round-trip).
-// Uses GOST R 34.10-2012 256-bit curve (CurveIdtc26gost341012256paramSetA).
+// R341012Sign/R341012Verify operate on the GOST R 34.10-2001 test parameter
+// set curve (id-GostR3410-2001-TestParamSet), not tc26-2012-256-A.
 func TestGost_R341012_Verify(t *testing.T) {
 	t.Parallel()
 
@@ -318,12 +335,21 @@ func TestFacade_GOST2814789(t *testing.T) {
 	pt := fhex(t, "1020304050607080")
 	want := fhex(t, "2685b30ddb497d05")
 
-	ct := GOST2814789Encrypt(key, pt)
+	ct, err := GOST2814789Encrypt(key, pt)
+	if err != nil {
+		t.Fatalf("GOST2814789Encrypt: %v", err)
+	}
+
 	if !bytes.Equal(ct, want) {
 		t.Fatalf("GOST2814789Encrypt = %x, want %x", ct, want)
 	}
 
-	if back := GOST2814789Decrypt(key, ct); !bytes.Equal(back, pt) {
+	back, err := GOST2814789Decrypt(key, ct)
+	if err != nil {
+		t.Fatalf("GOST2814789Decrypt: %v", err)
+	}
+
+	if !bytes.Equal(back, pt) {
 		t.Fatalf("GOST2814789Decrypt = %x, want %x", back, pt)
 	}
 }
