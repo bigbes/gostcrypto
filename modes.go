@@ -289,14 +289,22 @@ func GenerateEphemeralKey(curve *Curve, rnd io.Reader) (privRaw, pubRaw []byte, 
 	}
 
 	d := new(big.Int).SetBytes(beRaw)
+	d.Mod(d, q)
+
+	// Zero check must run AFTER the mod-q reduction: an input of LE(q) is
+	// nonzero before reduction but reduces to zero, which would otherwise yield
+	// an all-zero private key (and a nil public key) with no error. gogost's
+	// NewPrivateKeyLE errors on this input; rejecting it here keeps the two
+	// backends in agreement.
 	if d.Sign() == 0 {
 		return nil, nil, errEphemeralZeroKey
 	}
 
-	d.Mod(d, q)
-
 	priv := big2leFixed(d, ps)
 	pub := gost3410sign.PublicKeyRaw(curve.inner, priv)
+	if pub == nil {
+		return nil, nil, errEphemeralZeroKey
+	}
 
 	return priv, pub, nil
 }

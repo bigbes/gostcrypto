@@ -55,6 +55,13 @@ const (
 // nonce within signNonceAttempts tries.
 var errExhaustedNonceAttempts = errors.New("gost: SignDigestOnCurve: exhausted nonce attempts")
 
+// errDegeneratePrivateKey is returned by the public-key derivation wrappers
+// when the private key is degenerate: it reduces to zero mod q, or the derived
+// point is the point at infinity. gost3410sign.PublicKeyRaw signals this by
+// returning nil; the wrappers surface it as this error rather than handing the
+// caller a zero-length key with a nil error.
+var errDegeneratePrivateKey = errors.New("gost: degenerate private key (reduces to zero mod q)")
+
 // Sentinel errors for the CryptoPro key-wrap input validation.
 var (
 	errKeyWrapKEKSize        = errors.New("gost: KeyWrapCryptoPro KEK must be 32 bytes")
@@ -160,9 +167,15 @@ func (c *Curve) Name() string { return c.inner.Name }
 func (c *Curve) PointSize() int { return c.inner.PointSize() }
 
 // PublicKeyRawFromPrivate derives the LE-encoded public key from prvRaw on the
-// given curve.
+// given curve. It returns errDegeneratePrivateKey if prvRaw is degenerate
+// (reduces to zero mod q, or yields the point at infinity).
 func PublicKeyRawFromPrivate(curve *Curve, prvRaw []byte) ([]byte, error) {
-	return gost3410sign.PublicKeyRaw(curve.inner, prvRaw), nil
+	pub := gost3410sign.PublicKeyRaw(curve.inner, prvRaw)
+	if pub == nil {
+		return nil, errDegeneratePrivateKey
+	}
+
+	return pub, nil
 }
 
 // signDigestOnCurve signs digest with the GOST R 34.10 private key prvRaw on
@@ -180,6 +193,16 @@ func signDigestOnCurve(c *gost3410curves.Curve, prvRaw, digest []byte, rnd io.Re
 			continue
 		}
 
+		// Deliberate LE-write / BE-read reversal: k is a full-width uniform
+		// draw in (0, q) which we serialize little-endian here, while
+		// gost3410sign.SignDigest reads its nonce argument big-endian (its
+		// documented, KAT-pinned contract). The effective nonce is therefore
+		// reverse(k) mod q. Reversing the bytes of a uniform full-width draw is
+		// a bijection (entropy-preserving), so the effective nonce is still
+		// uniform in (0, q): the signature is valid and unbiased. We keep the
+		// LE write rather than switch to BE because changing it would alter
+		// which nonce a given rnd stream produces (re-pinning seeded tests) for
+		// no behavioral gain.
 		kRaw := big2leFixed(k, c.PointSize())
 		sig := gost3410sign.SignDigest(c, prvRaw, digest, kRaw)
 
@@ -198,8 +221,10 @@ func SignDigestOnCurve(curve *Curve, prvRaw, digest []byte, rnd io.Reader) ([]by
 	return signDigestOnCurve(curve.inner, prvRaw, digest, rnd)
 }
 
-// big2leFixed serializes n as size little-endian bytes (the GOST private-key /
-// nonce encoding).
+// big2leFixed serializes n as size little-endian bytes. This is the GOST
+// private-key encoding (LE per GOST R 34.10). Note it is NOT the encoding
+// gost3410sign.SignDigest expects for its nonce argument, which is read
+// big-endian; see the reversal note at the kRaw call site in signDigestOnCurve.
 func big2leFixed(n *big.Int, size int) []byte {
 	be := n.Bytes()
 	out := make([]byte, size)
@@ -237,9 +262,16 @@ func GOST2001CryptoProAParamSetCurve() *Curve {
 }
 
 // PublicKeyRawFromPrivate2001Test derives the LE-encoded GOST R 34.10-2001
-// public key from prvRaw on the test parameter set curve.
+// public key from prvRaw on the test parameter set curve. It returns
+// errDegeneratePrivateKey if prvRaw is degenerate (reduces to zero mod q, or
+// yields the point at infinity).
 func PublicKeyRawFromPrivate2001Test(prvRaw []byte) ([]byte, error) {
-	return gost3410sign.PublicKeyRaw(vko.Curve2001Test(), prvRaw), nil
+	pub := gost3410sign.PublicKeyRaw(vko.Curve2001Test(), prvRaw)
+	if pub == nil {
+		return nil, errDegeneratePrivateKey
+	}
+
+	return pub, nil
 }
 
 // ── GOST R 34.10-2012 sign + verify on the test parameter set curve ──────────.

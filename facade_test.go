@@ -1409,6 +1409,108 @@ func TestFacade_PublicKeyRawFromPrivate2001Test(t *testing.T) {
 	}
 }
 
+// ── R2-FACA-01: degenerate-key error surfacing ───────────────────────────────.
+
+// TestFacade_PublicKeyRawFromPrivate_DegenerateKey pins R2-FACA-01: a private
+// key that reduces to zero mod q (here the all-zero 32-byte key) must yield a
+// non-nil error and a nil public key, not (nil, nil). A valid key still returns
+// (pub, nil).
+func TestFacade_PublicKeyRawFromPrivate_DegenerateKey(t *testing.T) {
+	t.Parallel()
+
+	c := GOST2001TestParamSetCurve()
+
+	// Zero key: reduces to 0 mod q -> degenerate.
+	zero := make([]byte, 32)
+
+	pub, err := PublicKeyRawFromPrivate(c, zero)
+	if err == nil {
+		t.Fatal("PublicKeyRawFromPrivate(zero key): want non-nil error, got nil")
+	}
+
+	if pub != nil {
+		t.Fatalf("PublicKeyRawFromPrivate(zero key): want nil pub, got %x", pub)
+	}
+
+	pub2, err := PublicKeyRawFromPrivate2001Test(zero)
+	if err == nil {
+		t.Fatal("PublicKeyRawFromPrivate2001Test(zero key): want non-nil error, got nil")
+	}
+
+	if pub2 != nil {
+		t.Fatalf("PublicKeyRawFromPrivate2001Test(zero key): want nil pub, got %x", pub2)
+	}
+
+	// A valid key still returns (pub, nil) for both entry points.
+	prvRaw := fhex(t, "7a929ade789bb9be10ed359dd39a72c11b60961f49397eee1d19ce9891ec3b28")
+
+	good, err := PublicKeyRawFromPrivate(c, prvRaw)
+	if err != nil {
+		t.Fatalf("PublicKeyRawFromPrivate(valid key): %v", err)
+	}
+
+	if len(good) != 64 {
+		t.Fatalf("PublicKeyRawFromPrivate(valid key): pub len = %d, want 64", len(good))
+	}
+
+	good2, err := PublicKeyRawFromPrivate2001Test(prvRaw)
+	if err != nil {
+		t.Fatalf("PublicKeyRawFromPrivate2001Test(valid key): %v", err)
+	}
+
+	if len(good2) != 64 {
+		t.Fatalf("PublicKeyRawFromPrivate2001Test(valid key): pub len = %d, want 64", len(good2))
+	}
+}
+
+// ── R2-FACA-02: zero-check after mod-q in GenerateEphemeralKey ────────────────.
+
+// TestFacade_GenerateEphemeralKey_LEqInput pins R2-FACA-02: feeding raw bytes
+// equal to LE(q) for the 2001 test curve reduces to zero mod q and must return
+// an error (previously it returned an all-zero key with a nil public key and
+// nil error). This converges the clean-room facade with the gogost backend,
+// which errors on the same input.
+func TestFacade_GenerateEphemeralKey_LEqInput(t *testing.T) {
+	t.Parallel()
+
+	c := GOST2001TestParamSetCurve()
+
+	// q for Curve2001Test, big-endian (vko/vko.go:282).
+	qBE := fhex(t, "8000000000000000000000000000000150FE8A1892976154C59CFC193ACCF5B3")
+
+	// GenerateEphemeralKey reads raw little-endian, so feed LE(q).
+	raw := make([]byte, len(qBE))
+	for i := range qBE {
+		raw[len(qBE)-1-i] = qBE[i]
+	}
+
+	priv, pub, err := GenerateEphemeralKey(c, bytes.NewReader(raw))
+	if err == nil {
+		t.Fatalf("GenerateEphemeralKey(LE(q)): want error, got priv=%x pub=%x", priv, pub)
+	}
+
+	if priv != nil || pub != nil {
+		t.Fatalf("GenerateEphemeralKey(LE(q)): want nil priv/pub, got priv=%x pub=%x", priv, pub)
+	}
+
+	// Normal path is unaffected: a non-degenerate draw still succeeds.
+	good := make([]byte, c.PointSize())
+	good[0] = 0x42
+
+	gPriv, gPub, err := GenerateEphemeralKey(c, bytes.NewReader(good))
+	if err != nil {
+		t.Fatalf("GenerateEphemeralKey(normal): %v", err)
+	}
+
+	if len(gPriv) != c.PointSize() {
+		t.Fatalf("GenerateEphemeralKey(normal): priv len = %d, want %d", len(gPriv), c.PointSize())
+	}
+
+	if len(gPub) != 2*c.PointSize() {
+		t.Fatalf("GenerateEphemeralKey(normal): pub len = %d, want %d", len(gPub), 2*c.PointSize())
+	}
+}
+
 // ── FACA-81: one-shot block helper length checks ─────────────────────────────.
 
 // TestFacade_BlockHelpers_LengthValidation verifies that the one-shot block
