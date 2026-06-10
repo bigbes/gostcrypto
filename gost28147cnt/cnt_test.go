@@ -25,7 +25,7 @@ func mustHex(t *testing.T, s string) []byte {
 func keystream(sbox gost28147.SBox, n int) []byte {
 	key := make([]byte, gost28147.KeySize)
 	iv := make([]byte, gost28147.BlockSize)
-	s := gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv, sbox)
+	s := gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv)
 	out := make([]byte, n)
 	s.XORKeyStream(out, out) // src is zero → out becomes the raw gamma.
 
@@ -155,14 +155,14 @@ func TestKAT_EngineEncTry(t *testing.T) {
 	sbox := gost28147.SboxCryptoProA
 
 	ct := make([]byte, len(pt))
-	gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv, sbox).XORKeyStream(ct, pt)
+	gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv).XORKeyStream(ct, pt)
 
 	if !bytes.Equal(ct, wantCT) {
 		t.Errorf("encrypt: got %x, want %x", ct, wantCT)
 	}
 
 	back := make([]byte, len(wantCT))
-	gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv, sbox).XORKeyStream(back, wantCT)
+	gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv).XORKeyStream(back, wantCT)
 
 	if !bytes.Equal(back, pt) {
 		t.Errorf("decrypt: got %q, want %q", back, pt)
@@ -185,10 +185,10 @@ func TestInvolution(t *testing.T) {
 			}
 
 			ct := make([]byte, n)
-			gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv, sbox).XORKeyStream(ct, pt)
+			gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv).XORKeyStream(ct, pt)
 
 			back := make([]byte, n)
-			gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv, sbox).XORKeyStream(back, ct)
+			gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv).XORKeyStream(back, ct)
 
 			if !bytes.Equal(back, pt) {
 				t.Fatalf("n=%d: involution failed", n)
@@ -219,11 +219,11 @@ func TestStreamingEqualsOneShot(t *testing.T) {
 	}
 
 	oneShot := make([]byte, n)
-	gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv, sbox).XORKeyStream(oneShot, pt)
+	gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv).XORKeyStream(oneShot, pt)
 
 	// Split at several awkward boundaries.
 	for _, splits := range [][]int{{1}, {7}, {8}, {9}, {3, 5, 13, 64, 511, 513}, {1023, 1024, 1025}} {
-		s := gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv, sbox)
+		s := gost28147cnt.NewCNT(gost28147.NewCipher(key, sbox), iv)
 		got := make([]byte, n)
 		off := 0
 

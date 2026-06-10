@@ -283,7 +283,7 @@ func NewGOST28147_CNT(key, iv []byte) (cipher.Stream, error) {
 
 	c := crgost28147.NewCipher(key, crgost28147.SboxCryptoProA)
 
-	return &gostCNTStream{inner: gost28147cnt.NewCNT(c, iv, crgost28147.SboxCryptoProA)}, nil
+	return &gostCNTStream{inner: gost28147cnt.NewCNT(c, iv)}, nil
 }
 
 // GOST28147_IMIT computes the GOST 28147-89 IMIT MAC over msg using the given
