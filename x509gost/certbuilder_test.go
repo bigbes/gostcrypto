@@ -323,12 +323,23 @@ type extensionParams struct {
 	setBasicConstraints bool
 	isCA                bool
 
+	// setPathLen, when true, includes pathLenConstraint=pathLen in the
+	// BasicConstraints extension (only meaningful with setBasicConstraints &&
+	// isCA). pathLen must be >= 0.
+	setPathLen bool
+	pathLen    int
+
 	// keyUsageCertSign, when set, emits a KeyUsage extension asserting
 	// keyCertSign (bit 5).
 	keyUsageCertSign bool
 
 	// ekuOIDs, when non-empty, emits an ExtKeyUsage extension listing them.
 	ekuOIDs []asn1.ObjectIdentifier
+
+	// unknownCriticalOID, when non-empty, emits an extension with this OID
+	// marked critical and an empty value. The stdlib parser does not recognize
+	// it, so it lands in Stdlib.UnhandledCriticalExtensions.
+	unknownCriticalOID asn1.ObjectIdentifier
 }
 
 // buildExtensionsDER builds the [3] EXPLICIT Extensions field for a
@@ -337,14 +348,42 @@ func buildExtensionsDER(p extensionParams) ([]byte, error) {
 	var extns [][]byte
 
 	if p.setBasicConstraints {
-		bcVal, err := asn1.Marshal(struct {
-			CA bool `asn1:"optional"`
-		}{p.isCA})
+		var (
+			bcVal []byte
+			err   error
+		)
+
+		if p.setPathLen {
+			// BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+			//   pathLenConstraint INTEGER (0..MAX) OPTIONAL }. The stdlib
+			// parser only reads pathLen when cA is TRUE. encoding/asn1 drops an
+			// `optional` INTEGER whose value is 0, so the INTEGER is built
+			// explicitly (non-optional) here to guarantee pathLen=0 is on the
+			// wire.
+			bcVal, err = asn1.Marshal(struct {
+				CA      bool
+				PathLen int
+			}{p.isCA, p.pathLen})
+		} else {
+			bcVal, err = asn1.Marshal(struct {
+				CA bool `asn1:"optional"`
+			}{p.isCA})
+		}
+
 		if err != nil {
 			return nil, err
 		}
 
 		ext, err := marshalExtension(asn1.ObjectIdentifier{2, 5, 29, 19}, true, bcVal)
+		if err != nil {
+			return nil, err
+		}
+
+		extns = append(extns, ext)
+	}
+
+	if len(p.unknownCriticalOID) > 0 {
+		ext, err := marshalExtension(p.unknownCriticalOID, true, []byte{})
 		if err != nil {
 			return nil, err
 		}
