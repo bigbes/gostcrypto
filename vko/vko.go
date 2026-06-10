@@ -128,16 +128,14 @@ func loadPublicLE(c *gost3410curves.Curve, raw []byte) (gost3410curves.Point, er
 }
 
 // ---------------------------------------------------------------------------
-// Cofactors (guide D2). The curves package carries no cofactor field, so the
-// VKO layer pins them by curve name. All paramsets used by the inline KATs and
-// by TLS have cofactor 1; the twisted-Edwards-derived sets A (256) and C (512)
-// have cofactor 4. Default to 1 for unknown names.
+// Cofactors (guide D2). The curves package now carries a Cofactor field, so the
+// VKO layer reads it directly. All CryptoPro paramsets and tc26-512-A/B have
+// Cofactor==1; tc26-256-A and tc26-512-C have Cofactor==4 (twisted-Edwards
+// derived). A zero Cofactor (hand-built curve) is treated as 1 for safety.
 // ---------------------------------------------------------------------------.
 
 func cofactor(c *gost3410curves.Curve) *big.Int {
-	switch c.Name {
-	case "id-tc26-gost-3410-12-256-paramSetA",
-		"id-tc26-gost-3410-12-512-paramSetC":
+	if c.Cofactor == cofactor4 {
 		return big.NewInt(cofactor4)
 	}
 
@@ -151,9 +149,14 @@ func cofactor(c *gost3410curves.Curve) *big.Int {
 // agreementRaw computes the serialized agreement point LE(K_x)||LE(K_y).
 //
 // Following gogost's factoring (guide D2): K1 = d·Q, u = UKM·cofactor, and if
-// u != 1 then K = u·K1, else K = K1. UKM is treated as immutable. Reducing the
-// whole scalar mod q in one shot would be equally correct; the cofactor must
-// not be double-applied.
+// u != 1 then K = u·K1, else K = K1. UKM is treated as immutable.
+//
+// VKO-62 reduction: u is reduced modulo the full group order (cofactor·q)
+// before the ScalarMult. This bounds the ScalarMult cost to O(bitLen(cofactor·q))
+// regardless of how large the UKM is, while preserving the KEK exactly:
+// ord(K1) divides cofactor·q for every point on the curve, so
+// (u mod cofactor·q)·K1 == u·K1 exactly, including torsion components on the
+// cofactor-4 curves. The cofactor must not be double-applied.
 func agreementRaw(c *gost3410curves.Curve, d, ukm *big.Int, q gost3410curves.Point) ([]byte, error) {
 	if ukm.Sign() == 0 {
 		return nil, errZeroUKM
@@ -165,8 +168,17 @@ func agreementRaw(c *gost3410curves.Curve, d, ukm *big.Int, q gost3410curves.Poi
 		return nil, errIdentity
 	}
 
-	// u = UKM · cofactor (copy ukm; do not mutate the caller's value).
-	u := new(big.Int).Mul(ukm, cofactor(c))
+	// u = UKM · cofactor, reduced mod fullGroupOrder = cofactor·q.
+	// The reduction is KEK-preserving: ord(K1) | cofactor·q.
+	cof := cofactor(c)
+	u := new(big.Int).Mul(ukm, cof)
+	fullOrder := new(big.Int).Mul(cof, c.Q)
+	u.Mod(u, fullOrder)
+	if u.Sign() == 0 {
+		// u·K1 would be the identity; same failure the post-ScalarMult
+		// IsInfinity check reports.
+		return nil, errIdentity
+	}
 
 	var k gost3410curves.Point
 
@@ -252,13 +264,14 @@ func curve2001Test() *gost3410curves.Curve {
 	}
 
 	return &gost3410curves.Curve{
-		P:    mustHex("8000000000000000000000000000000000000000000000000000000000000431"),
-		A:    mustHex("0000000000000000000000000000000000000000000000000000000000000007"),
-		B:    mustHex("5FBFF498AA938CE739B8E022FBAFEF40563F6E6A3472FC2A514C0CE9DAE23B7E"),
-		Q:    mustHex("8000000000000000000000000000000150FE8A1892976154C59CFC193ACCF5B3"),
-		X:    mustHex("0000000000000000000000000000000000000000000000000000000000000002"),
-		Y:    mustHex("08E2A8A0E65147D4BD6316030E16D19C85C97F0A9CA267122B96ABBCEA7E8FC8"),
-		Name: "id-GostR3410-2001-TestParamSet",
+		P:        mustHex("8000000000000000000000000000000000000000000000000000000000000431"),
+		A:        mustHex("0000000000000000000000000000000000000000000000000000000000000007"),
+		B:        mustHex("5FBFF498AA938CE739B8E022FBAFEF40563F6E6A3472FC2A514C0CE9DAE23B7E"),
+		Q:        mustHex("8000000000000000000000000000000150FE8A1892976154C59CFC193ACCF5B3"),
+		X:        mustHex("0000000000000000000000000000000000000000000000000000000000000002"),
+		Y:        mustHex("08E2A8A0E65147D4BD6316030E16D19C85C97F0A9CA267122B96ABBCEA7E8FC8"),
+		Name:     "id-GostR3410-2001-TestParamSet",
+		Cofactor: 1,
 	}
 }
 
