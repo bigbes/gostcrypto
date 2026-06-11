@@ -404,8 +404,10 @@ func FuzzSignVerifyRoundTrip(f *testing.F) {
 func effectiveE(q *big.Int, digest []byte) *big.Int {
 	e := new(big.Int).SetBytes(digest)
 	e.Mod(e, q)
+
 	if e.Sign() == 0 {
 		e.SetInt64(1)
 	}
+
 	return e
 }
