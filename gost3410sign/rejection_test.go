@@ -381,14 +381,31 @@ func FuzzSignVerifyRoundTrip(f *testing.F) {
 			t.Fatal("SignDigest produced a signature that VerifyDigest rejects")
 		}
 
-		// A one-byte mutation of the digest must fail Verify.
+		// A one-byte mutation of the digest must fail Verify — but ONLY when it
+		// changes the effective scalar e. GOST normalizes e = (alpha mod q) with
+		// e == 0 remapped to 1 (§6.1/§6.2 step 2), so distinct digest bytes can
+		// collapse to the same e and legitimately share a signature (e.g. digest
+		// 0x00 and 0x01 both give e = 1). Guarding on e avoids that false alarm.
 		if len(dig) > 0 {
 			mutDig := append([]byte(nil), dig...)
 
 			mutDig[0] ^= 0x01
-			if gost3410sign.VerifyDigest(c, pub, mutDig, sig) {
+			if effectiveE(c.Q, dig).Cmp(effectiveE(c.Q, mutDig)) != 0 &&
+				gost3410sign.VerifyDigest(c, pub, mutDig, sig) {
 				t.Fatal("VerifyDigest accepted a mutated digest")
 			}
 		}
 	})
+}
+
+// effectiveE returns the scalar e that Sign/Verify actually use for a digest:
+// alpha mod q (digest read big-endian), with e == 0 remapped to 1 per
+// GOST R 34.10 §6.1/§6.2 step 2.
+func effectiveE(q *big.Int, digest []byte) *big.Int {
+	e := new(big.Int).SetBytes(digest)
+	e.Mod(e, q)
+	if e.Sign() == 0 {
+		e.SetInt64(1)
+	}
+	return e
 }
