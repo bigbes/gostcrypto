@@ -175,7 +175,7 @@ func agreementRaw(c *gost3410curves.Curve, d, ukm *big.Int, q gost3410curves.Poi
 	}
 
 	// K1 = d·Q.
-	k1 := c.ScalarMult(d, q)
+	k1 := c.ScalarMultSecret(d, q)
 	if k1.IsInfinity() {
 		return nil, errIdentity
 	}
@@ -307,7 +307,7 @@ func DeriveQLE(c *gost3410curves.Curve, dLE []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	q := c.ScalarMult(d, c.Base())
+	q := c.ScalarMultSecret(d, c.Base())
 	if q.IsInfinity() {
 		return nil, errDerivedID
 	}

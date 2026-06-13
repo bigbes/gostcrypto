@@ -80,7 +80,7 @@ func SignDigest(c *curves.Curve, prv, digest, k []byte) []byte {
 	}
 
 	// C = k·P; r = x_C mod q. If r == 0, the caller must retry with a new k.
-	cPoint := c.ScalarMult(kk, c.Base())
+	cPoint := c.ScalarMultSecret(kk, c.Base())
 	if cPoint.IsInfinity() {
 		return nil
 	}
@@ -201,7 +201,7 @@ func PublicKeyRaw(c *curves.Curve, prv []byte) []byte {
 		return nil
 	}
 
-	pub := c.ScalarMult(d, c.Base())
+	pub := c.ScalarMultSecret(d, c.Base())
 	if pub.IsInfinity() {
 		return nil
 	}
