@@ -273,6 +273,11 @@ func lInvFast(blk *[BlockSize]byte) {
 // keys.
 type Cipher struct {
 	ks [10][BlockSize]byte
+
+	// constantTime selects the per-round transform: false → the fast table
+	// path, true → the full-scan constant-time path (NewCipherCT). It is public
+	// configuration, not a secret, so dispatching on it leaks nothing.
+	constantTime bool
 }
 
 var _ cipher.Block = (*Cipher)(nil)
@@ -312,7 +317,7 @@ func (c *Cipher) Encrypt(dst, src []byte) {
 
 	for i := range 9 {
 		xor(&blk, &c.ks[i])
-		slEncrypt(&blk) // fused S then L.
+		c.sl(&blk) // fused S then L (table or constant-time per c.constantTime).
 	}
 
 	xor(&blk, &c.ks[9])
@@ -336,8 +341,8 @@ func (c *Cipher) Decrypt(dst, src []byte) {
 
 	for i := 9; i >= 1; i-- {
 		xor(&blk, &c.ks[i])
-		lInvFast(&blk) // fused L⁻¹ (table-driven; output identical to lInv).
-		sInv(&blk)
+		c.linv(&blk) // fused L⁻¹ (table or constant-time).
+		c.sinv(&blk)
 	}
 
 	xor(&blk, &c.ks[0])
@@ -361,7 +366,7 @@ func (c *Cipher) expandKey(key []byte) {
 			// F[C]: LSX[C](kr0) XOR kr1, then swap.
 			krt := kr0
 			xor(&krt, &cnst[8*i+j]) // X[C].
-			slEncrypt(&krt)         // S then L (fused).
+			c.sl(&krt)              // S then L (fused; CT-aware).
 			xor(&krt, &kr1)         // XOR right half.
 
 			kr1 = kr0 // swap.
