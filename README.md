@@ -23,6 +23,7 @@ gostcrypto/                  package gostcrypto — the public facade (clean-roo
   streebog/ kuznyechik/ …    BSD clean-room primitives, each importable directly;
                              each package carries its clean-room implementation guide (*.md)
   x509gost/…                 GOST-signed X.509 parse/verify
+  internal/ct/               shared branch-free masking primitives for the constant-time paths
 ```
 
 - **Facade** (root `gostcrypto` package): a stable `[]byte`-in/`[]byte`-out API.
@@ -71,6 +72,33 @@ underlying math and the RFC constant tables are big-endian. When a test
 vector fails, check byte order first — each guide's "deltas" section lists
 the traps for that primitive.
 
+## Constant-time / side channels
+
+The default primitives are table-driven and **not constant-time** — they leak
+the key/plaintext through cache timing, matching the GOST software norm
+(gogost, gost-engine) and the table-driven AES shipped everywhere. Two
+experimental, leak-free paths exist alongside them, sharing the branch-free
+masking vocabulary in `internal/ct`:
+
+- **`kuznyechik.NewCipherCT(key)`** — a constant-time Kuznyechik whose
+  `Encrypt`/`Decrypt` and key schedule have no secret-dependent memory access
+  (SWAR full-scan S-box + GF(2)-linear `L` columns, no fused 64 KiB tables).
+  Byte-for-byte identical to the table cipher; ≈36× slower. See
+  [`kuznyechik/SECURITY.md`](kuznyechik/SECURITY.md).
+- **`gost3410curves.(*Curve).ScalarMultCT(k, p)`** — a constant-time EC scalar
+  multiply for *secret* scalars (signing nonce, private key), built on
+  fixed-limb Montgomery field arithmetic and complete short-Weierstrass
+  formulas. The variable-time `big.Int` `ScalarMult` remains the default; opt in
+  per `Curve` via the `ConstantTime` flag. See
+  [`gost3410curves/SECURITY.md`](gost3410curves/SECURITY.md) and
+  [`gost3410curves/EXPERIMENT-ct.md`](gost3410curves/EXPERIMENT-ct.md).
+
+Both are exercised by a verification harness in CI: **ctgrind**
+(valgrind/memcheck, instruction-level — fails if any branch/address depends on
+the poisoned secret) and **dudect** (statistical timing-leak sweep). Each runs a
+variable-time positive control that *must* be flagged, so a broken detector
+can't pass silently.
+
 ## Build & test
 
 ```sh
@@ -81,7 +109,9 @@ make fuzz    # drive every Fuzz target (FUZZTIME=1m by default)
 ```
 
 The KAT tests run oracle-free. CI (GitHub Actions) runs the test, lint, and
-fuzz workflows; their status is shown by the badges above.
+fuzz workflows (status shown by the badges above), plus parity / parity-fuzz
+differentials and the `ctgrind` + `dudect` constant-time checks on every pull
+request.
 
 ## Licensing
 
@@ -91,7 +121,11 @@ BSD-2-Clause
 
 - `<package>/<primitive>.md` — per-primitive clean-room re-implementation
   guide, next to the code it specifies (see the Packages table above).
-- `gost3410curves/SECURITY.md` — constant-time status of `ScalarMult`.
-- `kuznyechik/SECURITY.md` — cache-timing considerations for the table-driven S-L rounds.
+- `gost3410curves/SECURITY.md` — constant-time status of `ScalarMult` and the
+  experimental `ScalarMultCT`.
+- `gost3410curves/EXPERIMENT-ct.md` — design and verification methodology for the
+  constant-time EC scalar multiply (shared by both CT paths and the CI harness).
+- `kuznyechik/SECURITY.md` — cache-timing of the table-driven S-L rounds and the
+  experimental constant-time `NewCipherCT` path.
 - `TODO.md` — known gogost/gost-engine vector divergences (S-box row order,
   R 34.11-94 empty-input finalization, CryptoPro key meshing).

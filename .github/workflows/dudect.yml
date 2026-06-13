@@ -1,0 +1,29 @@
+name: dudect
+
+# Timing-leak checks for the experimental constant-time ScalarMult: a dudect
+# statistical sweep (Reparaz–Balasch–Verbauwhede 2016) and a wall-clock ratio
+# test, both with a variable-time positive control that MUST be flagged. They
+# get their own job because they are slow (~40s) and meaningless under the race
+# detector, which perturbs the timing they measure — the default `test` workflow
+# build-tags them out (CGO_ENABLED=0, no -race here). See the `dudect`-tagged
+# gost3410curves/ct{dudect,timing}_test.go and EXPERIMENT-ct.md.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dudect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: dudect + wall-clock timing — EC ScalarMult
+        run: CGO_ENABLED=0 go test -tags dudect -run 'TestDudect_CTvsBigInt|TestTimingLeak_BigIntVsCT' ./gost3410curves/ -v
