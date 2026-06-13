@@ -1,0 +1,37 @@
+name: ctgrind
+
+# Instruction-level constant-time check for the experimental ScalarMultCT, under
+# valgrind/memcheck. Poisons the secret scalar and fails if any branch/address in
+# the constant-time core depends on it; a variable-time positive control must be
+# flagged (so a broken detector can't pass silently). Linux-only — valgrind does
+# not run on macOS/arm64. See gost3410curves/ctgrind.sh and EXPERIMENT-ct.md.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ctgrind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      # valgrind + libc/ld.so debug symbols (the ld-linux memcmp redirection
+      # valgrind requires to run a dynamically-linked cgo binary).
+      - name: install valgrind + libc debug symbols
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind libc6-dbg
+
+      - name: ctgrind — EC ScalarMult
+        run: bash gost3410curves/ctgrind.sh
+
+      - name: ctgrind — Kuznyechik
+        run: bash kuznyechik/ctgrind.sh
