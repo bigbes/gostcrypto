@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 )
 
 // errUnknownCurveOID is returned by CurveByOID for an OID arc that is not one
@@ -73,6 +74,21 @@ type Curve struct {
 	Y        *big.Int // base-point affine Y.
 	Name     string
 	Cofactor int // cofactor h: #E = h·Q; always 1 or 4 for registered sets.
+
+	// ConstantTime selects the implementation used by ScalarMultSecret for
+	// secret scalars (signing nonce, private key): true → the constant-time
+	// ScalarMultCT, false → the variable-time reference ScalarMult. Set it once
+	// before first use; it is read, never written, on the hot path. Public
+	// scalars (verification) always use the reference path regardless.
+	ConstantTime bool
+
+	// ct*/ctCached* lazily memoise the constant-time Montgomery context used by
+	// ScalarMultCT (EXPERIMENT): the 4-limb context for ≤256-bit curves, the
+	// 8-limb one for 257–512-bit curves. Both stay nil for unsupported widths.
+	ctOnce    sync.Once
+	ctCached  *ctCurve
+	ctOnce8   sync.Once
+	ctCached8 *ctCurve8
 }
 
 // Point is an affine curve point. The identity (point at infinity) is

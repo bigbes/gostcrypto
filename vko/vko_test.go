@@ -451,7 +451,9 @@ func TestCofactorReject(t *testing.T) {
 	base := curve2001Test()
 
 	for _, badCofactor := range []int{0, 2, 8} {
-		c := *base // shallow copy; arithmetic fields are *big.Int (shared, read-only here).
+		// Fresh curve instance so we don't copy base's embedded sync.Once; base
+		// keeps its original Cofactor 1 for the deriveQ call below.
+		c := curve2001Test()
 
 		c.Cofactor = badCofactor
 
@@ -462,7 +464,7 @@ func TestCofactorReject(t *testing.T) {
 
 		q2 := deriveQ(t, base, d2) // derive on original curve (cofactor 1).
 
-		_, err := KEK2012256(&c, d1, q2, ukm)
+		_, err := KEK2012256(c, d1, q2, ukm)
 		if err == nil {
 			t.Errorf("Cofactor=%d: expected error, got nil", badCofactor)
 
