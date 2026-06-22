@@ -96,11 +96,27 @@ GOEXPERIMENT=simd CGO_ENABLED=0 go test ./kuznyechik/ -run x -fuzz FuzzEncryptBl
 GOEXPERIMENT=simd CGO_ENABLED=0 go test -tags dudect -run TestSimdDudect ./kuznyechik/   # pin: taskset -c N
 ```
 
+## CTR integration (`CTRXORBlocks`)
+
+`Cipher.CTRXORBlocks(dst, src, iv)` (same build tag) is the fused CTR keystream:
+it generates the 32 counter blocks directly byte-sliced (a SIMD ramp + carry —
+no input transpose, no per-block counter materialisation) and XORs the keystream
+into `dst` during the output transpose. `ctracpkm` detects it via an optional
+interface and prefers it over the generic `EncryptBlocks` batch path; absent it
+(non-SIMD builds, Magma) the per-block loop runs unchanged.
+
+This is the one place the block cipher owns the CTR counter convention (16-byte
+big-endian, last byte first) — a deliberate layering trade, since `EncryptBlocks`
+takes a contiguous buffer so avoiding counter materialisation means the generator
+must build counters itself. Result: `ctracpkm` Kuznyechik CTR runs at the raw
+round throughput (~101 MB/s on a Ryzen 3700X, **+55% vs the per-block path**),
+the CTR marshalling overhead eliminated. Validated by `TestCTRXORBlocks_vsScalar`
+and the `ctracpkm` official vectors + `TestBatch_EquivalentToPerBlock` flowing
+through the fused path; constant-time (reuses the dudect-clean round).
+
 ## Status / not done
 
 - Experimental: needs `GOEXPERIMENT=simd`, **amd64 only**, AVX2 at runtime.
-- Not wired into `ctracpkm` CTR yet — that streaming loop still calls
-  `Encrypt` one block at a time; batching it (respecting ACPKM section
-  boundaries) is the follow-up that lets gostls suite `0xC100` use this.
-- AVX-512 (64-block batches, wider `Uint8x64`) untested — the dev box is AVX2.
+- AVX-512 (64-block batches, wider `Uint8x64`, GFNI for L) untested — the dev box
+  is AVX2; that tier is the largest remaining headroom (~2× projected).
 - Decrypt has no SIMD path (CTR needs only encrypt).
