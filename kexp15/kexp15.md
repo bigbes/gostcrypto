@@ -6,8 +6,8 @@ KExp15 is the GOST **key-transport envelope**: it wraps a secret key `S`
 (typically a 32-byte pre-master / session key) so that it can be carried over
 the wire authenticated and encrypted under two independent export keys. KImp15
 is the exact inverse (decrypt, then verify the MAC). This package implements
-the export (wrap) direction only; see "Dismissed for kexp15" in
-`docs/audit-findings.md` for the rationale.
+the export (wrap) direction only; the import/unwrap direction is intentionally
+out of scope.
 
 *Intended implementer: a Sonnet-class coding agent — every constant, S-box, parameter table, and edge case is inlined so this primitive can be built without consulting gogost or external specs.*
 
