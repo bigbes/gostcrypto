@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x92\x17\x92\x17uu")
+[]byte("\x92\x17u\x1a\xa9\x9c")
+[]byte("\x92\x17")

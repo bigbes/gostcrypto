@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("τ")
+[]byte("d")
+[]byte("τ\xa3\x1ea\x1bf\xa4*\xe3\xe5\xef\x16\xbb\x9d")

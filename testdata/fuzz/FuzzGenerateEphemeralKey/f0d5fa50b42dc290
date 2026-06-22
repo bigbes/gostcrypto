@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\xff\xff70\xff1B\xffx\xff *Z\xff97\xff\xff\xffX$ &9")

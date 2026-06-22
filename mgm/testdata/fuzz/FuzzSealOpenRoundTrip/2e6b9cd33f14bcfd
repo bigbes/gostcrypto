@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("10A1z")
+[]byte("CZ7B7*cC")
+[]byte(" \xbd0000")
+[]byte("1090")
+byte('\x01')

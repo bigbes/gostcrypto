@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("\x887a(\x008")
+[]byte("9Z")
+[]byte("00                      00000000100000000")
+[]byte("Ba0A08")
+byte('\x00')

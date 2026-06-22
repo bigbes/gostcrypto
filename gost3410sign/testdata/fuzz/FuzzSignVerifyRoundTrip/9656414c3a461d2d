@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("0")
+[]byte("z\x1eA")
+[]byte("0")

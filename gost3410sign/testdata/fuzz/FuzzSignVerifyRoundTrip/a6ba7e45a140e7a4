@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("$\xfdb\xd12\xef!Z")
+[]byte("")
+[]byte("{\xfd\x1fX2% \xc2")

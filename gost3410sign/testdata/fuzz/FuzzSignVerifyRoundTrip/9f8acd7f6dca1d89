@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x95_9\x03n")
+[]byte("\x95_9")
+[]byte("\x95_9\x03n")

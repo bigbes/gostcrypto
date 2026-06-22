@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x00\x02\x00\x00n")
+[]byte("\xbcb+\x965")
+[]byte("\x8e\x1d9_")

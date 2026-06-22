@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x00a0.")
+[]byte("Vz2&\x0f\xf4\xed\x16\x1c9+Y$2")
+[]byte("0.")

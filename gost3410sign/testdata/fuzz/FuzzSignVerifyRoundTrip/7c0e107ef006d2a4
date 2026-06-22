@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("x2 a\x99\x12J\xbf\xac+^e\xa9#2")
+[]byte("")
+[]byte("20cccY18y1.zb\xde\xc3#")

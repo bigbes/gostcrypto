@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\xe2A\x93Y")
+[]byte("0")
+[]byte("\xe2b\x93\xe8\xce\x19")

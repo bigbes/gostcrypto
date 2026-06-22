@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x00\x00\xe8\xe8\xe8\xe8\xe8\xe8\xe8b!A2000.A20bY207B#\x000")
+[]byte("\x00\x00")
+[]byte("2")

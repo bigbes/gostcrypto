@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("zy77\x80\x10\xcf")

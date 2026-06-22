@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("0'\xea\\\xf0\xa82\x13\xc2^^PB\xb8\xbe%\xf1d$")
+[]byte("")
+[]byte("0")

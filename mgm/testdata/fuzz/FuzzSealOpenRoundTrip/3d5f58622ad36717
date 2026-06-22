@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("0")
+[]byte("0")
+[]byte("71\xcf999\xf39199119\xde11_0")
+[]byte("0")
+byte('\x12')
