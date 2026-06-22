@@ -30,13 +30,16 @@ jobs:
           go-version: "1.26"
 
       - name: build
-        run: go build ./kuznyechik/...
+        run: go build ./kuznyechik/... ./ctracpkm/...
 
       - name: vet
-        run: go vet ./kuznyechik/...
+        run: go vet ./kuznyechik/... ./ctracpkm/...
 
-      - name: test (KAT, equivalence, fuzz seeds)
-        run: go test ./kuznyechik/ -run 'Simd|EncryptBlocks'
+      - name: test kuznyechik (KAT, equivalence, CTR, fuzz seeds)
+        run: go test ./kuznyechik/ -run 'Simd|EncryptBlocks|CTRXORBlocks'
+
+      - name: test ctracpkm (vectors + batch/fused equivalence run through SIMD)
+        run: go test ./ctracpkm/
 
       - name: fuzz vs table oracle
         run: go test ./kuznyechik/ -run x -fuzz FuzzEncryptBlocks_vs_Table -fuzztime 60s

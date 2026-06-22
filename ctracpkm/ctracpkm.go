@@ -12,6 +12,18 @@
 // under the current key. The counter is never reset by ACPKM — only the key
 // changes.
 //
+// # Batched keystream
+//
+// When the block cipher implements EncryptBlocks(dst, src []byte) (e.g.
+// kuznyechik.Cipher), full-block keystream runs are generated in one batched
+// call instead of block by block. A cipher may additionally implement the fused
+// CTRXORBlocks (the experimental SIMD Kuznyechik does), which generates the
+// sliced counters and XORs the keystream in one pass — preferred when present.
+// This is purely an internal optimisation: the output and the carried state are
+// identical to the per-block path, the batch is bounded to the current ACPKM
+// section so it never crosses a rekey, and it degrades to the per-block loop for
+// partial gamma, short tails, and ciphers without the methods (e.g. Magma).
+//
 // # References
 //
 //   - RFC 8645: https://github.com/bigbes/gostcrypto/blob/master/ctracpkm/rfc/rfc8645.txt
@@ -48,18 +60,49 @@ const (
 // key and every re-derived section key are exactly this many bytes.
 const acpkmKeySize = 32
 
+// minBulkBlocks is the smallest whole-block run for which the batched path is
+// taken. It matches the SIMD batch width of kuznyechik.EncryptBlocks (32): a
+// shorter run gains nothing from the batch and is left to the per-block loop.
+// maxBulkBlocks bounds the per-call scratch buffers.
+const (
+	minBulkBlocks = 32
+	maxBulkBlocks = 256
+)
+
+// bulkEncrypter is the optional fast-bulk capability of a block cipher: encrypt
+// a run of consecutive blocks (identically to len/BlockSize Encrypt calls).
+// kuznyechik.Cipher implements it; Magma does not.
+type bulkEncrypter interface {
+	cipher.Block
+	EncryptBlocks(dst, src []byte)
+}
+
+// ctrBulkXORer is the optional fused-CTR capability: XOR a whole-block run of
+// src into dst with the CTR keystream from iv (big-endian, last byte first),
+// advancing iv. It avoids counter materialisation and the separate XOR pass.
+// The experimental SIMD Kuznyechik (CTRXORBlocks) implements it; preferred over
+// bulkEncrypter when present.
+type ctrBulkXORer interface {
+	cipher.Block
+	CTRXORBlocks(dst, src, iv []byte)
+}
+
 // CTR is a GOST CTR / CTR-ACPKM keystream generator. It satisfies
 // cipher.Stream. Split XORKeyStream calls produce the same output as a single
 // one-shot call (the partial-block offset is carried across calls).
 type CTR struct {
 	newBlock    func([]byte) cipher.Block // re-key factory; nil ⇒ plain CTR.
 	block       cipher.Block              // current section key's cipher.
+	bulk        bulkEncrypter             // non-nil ⇒ block supports EncryptBlocks.
+	fused       ctrBulkXORer              // non-nil ⇒ block supports fused CTRXORBlocks.
 	blockSize   int                       // n.
 	iv          []byte                    // running counter (len == blockSize).
 	gamma       []byte                    // current keystream block E(counter).
 	num         int                       // bytes already consumed from gamma.
 	sectionSize int                       // ACPKM section N; 0 ⇒ plain CTR.
 	sinceRekey  int                       // keystream bytes under current key.
+	ctrBuf      []byte                    // scratch: batched counter blocks.
+	ksBuf       []byte                    // scratch: batched keystream blocks.
 }
 
 var _ cipher.Stream = (*CTR)(nil)
@@ -83,6 +126,9 @@ func NewCTR(b cipher.Block, iv []byte) cipher.Stream {
 		gamma:     make([]byte, bs),
 		num:       bs, // force a fresh gamma block on first use.
 	}
+
+	c.bulk, _ = b.(bulkEncrypter)
+	c.fused, _ = b.(ctrBulkXORer)
 	copy(c.iv, iv)
 
 	return c
@@ -138,6 +184,9 @@ func NewCTRACPKM(newBlock func(key []byte) cipher.Block, key, iv []byte, section
 		num:         bs,
 		sectionSize: sectionSize,
 	}
+
+	c.bulk, _ = b.(bulkEncrypter)
+	c.fused, _ = b.(ctrBulkXORer)
 	copy(c.iv, iv)
 
 	return c
@@ -159,7 +208,7 @@ func (c *CTR) XORKeyStream(dst, src []byte) {
 		panic("ctracpkm: invalid buffer overlap")
 	}
 
-	for i := range src {
+	for i := 0; i < len(src); {
 		if c.num == c.blockSize {
 			// Need a fresh gamma block. ACPKM rekeys BEFORE generating the
 			// first block of a new section: if we have produced >= sectionSize
@@ -169,6 +218,17 @@ func (c *CTR) XORKeyStream(dst, src []byte) {
 				c.rekeyACPKM()
 
 				c.sinceRekey = 0
+			}
+
+			// Fast path: at a clean block boundary, generate a whole-block run
+			// in one batched cipher call. Bounded to the current section so the
+			// batch never spans a rekey; identical output and state to the loop.
+			if c.bulk != nil {
+				if n := c.bulkXOR(dst[i:], src[i:]); n > 0 {
+					i += n
+
+					continue
+				}
 			}
 
 			c.block.Encrypt(c.gamma, c.iv)
@@ -181,7 +241,67 @@ func (c *CTR) XORKeyStream(dst, src []byte) {
 		c.num++
 
 		c.sinceRekey++
+
+		i++
 	}
+}
+
+// bulkXOR generates a run of whole keystream blocks in one batched call and XORs
+// it into dst, returning the number of bytes consumed (0 if the run is too short
+// to batch). It is only called at a block boundary (c.num == blockSize) after
+// any pending rekey, so c.gamma/c.num are untouched and the run stays within the
+// current ACPKM section. The fused CTRXORBlocks path is preferred when available
+// (no counter materialisation, no separate XOR pass); otherwise EncryptBlocks
+// over a scratch counter buffer.
+func (c *CTR) bulkXOR(dst, src []byte) int {
+	blocks := len(src) / c.blockSize
+	if c.sectionSize > 0 {
+		if untilRekey := (c.sectionSize - c.sinceRekey) / c.blockSize; blocks > untilRekey {
+			blocks = untilRekey
+		}
+	}
+
+	if blocks < minBulkBlocks {
+		return 0
+	}
+
+	if c.fused != nil {
+		n := blocks * c.blockSize
+
+		c.fused.CTRXORBlocks(dst[:n], src[:n], c.iv) // advances c.iv.
+
+		c.sinceRekey += n
+
+		return n
+	}
+
+	if blocks > maxBulkBlocks {
+		blocks = maxBulkBlocks
+	}
+
+	n := blocks * c.blockSize
+	if cap(c.ctrBuf) < n {
+		c.ctrBuf = make([]byte, maxBulkBlocks*c.blockSize)
+		c.ksBuf = make([]byte, maxBulkBlocks*c.blockSize)
+	}
+
+	ctrBuf := c.ctrBuf[:n]
+	ksBuf := c.ksBuf[:n]
+
+	for off := 0; off < n; off += c.blockSize {
+		copy(ctrBuf[off:], c.iv)
+		incCounter(c.iv)
+	}
+
+	c.bulk.EncryptBlocks(ksBuf, ctrBuf)
+
+	for j := range n {
+		dst[j] = src[j] ^ ksBuf[j]
+	}
+
+	c.sinceRekey += n
+
+	return n
 }
 
 // rekeyACPKM advances the section key: newKey = E_K(D_1) || ... || E_K(D_J)
@@ -202,6 +322,8 @@ func (c *CTR) rekeyACPKM() {
 	}
 
 	c.block = c.newBlock(newKey)
+	c.bulk, _ = c.block.(bulkEncrypter)
+	c.fused, _ = c.block.(ctrBulkXORer)
 }
 
 // incCounter increments the counter block as a single big-endian integer:
