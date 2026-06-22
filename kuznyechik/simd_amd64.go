@@ -103,38 +103,64 @@ func simdHi4(x archsimd.Uint8x32) archsimd.Uint8x32 {
 	return x.AsUint16x16().MulHigh(simdC1000).AsUint8x32().And(simdMaskLow)
 }
 
-// simdS applies π to each of the 16 byte-sliced registers.
+// simdS applies π to each of the 16 byte-sliced registers. The 16 high-nibble
+// sub-table lookups are masked into four independent OR accumulators (instead of
+// one 16-deep Merge chain) so they pipeline; exactly one sub-table matches per
+// lane, so OR-combining is correct.
 func simdS(in, out *[16]archsimd.Uint8x32) {
 	zero := archsimd.BroadcastUint8x32(0)
+
 	for r := 0; r < 16; r++ {
 		v := in[r]
 		lo := v.And(simdMaskLow).AsInt8x32()
 		hi := v.And(simdMaskHi)
-		res := zero
-		for h := 0; h < 16; h++ {
-			res = simdSub[h].PermuteOrZeroGrouped(lo).Merge(res, hi.Equal(simdHiConst[h]))
+
+		p0, p1, p2, p3 := zero, zero, zero, zero
+		for h := 0; h < 16; h += 4 {
+			p0 = p0.Or(simdSub[h].PermuteOrZeroGrouped(lo).Masked(hi.Equal(simdHiConst[h])))
+			p1 = p1.Or(simdSub[h+1].PermuteOrZeroGrouped(lo).Masked(hi.Equal(simdHiConst[h+1])))
+			p2 = p2.Or(simdSub[h+2].PermuteOrZeroGrouped(lo).Masked(hi.Equal(simdHiConst[h+2])))
+			p3 = p3.Or(simdSub[h+3].PermuteOrZeroGrouped(lo).Masked(hi.Equal(simdHiConst[h+3])))
 		}
-		out[r] = res
+
+		out[r] = p0.Or(p1).Or(p2.Or(p3))
 	}
 }
 
-// simdL applies L = the GF(2^8) matrix multiply-accumulate over the 16 registers.
+// simdL applies L = the GF(2^8) matrix multiply-accumulate over the 16
+// registers. Each output's 16 products go into four independent XOR
+// accumulators (depth 4 instead of a 16-deep serial chain) to expose ILP.
 func simdL(in, out *[16]archsimd.Uint8x32) {
+	zero := archsimd.BroadcastUint8x32(0)
+
 	var lo, hi [16]archsimd.Int8x32
 	for i := 0; i < 16; i++ {
 		lo[i] = in[i].And(simdMaskLow).AsInt8x32()
 		hi[i] = simdHi4(in[i]).AsInt8x32()
 	}
+
 	for j := 0; j < 16; j++ {
-		acc := archsimd.BroadcastUint8x32(0)
-		for i := 0; i < 16; i++ {
-			c := simdMatM[j][i]
-			if c == 0 {
-				continue
+		a0, a1, a2, a3 := zero, zero, zero, zero
+
+		for i := 0; i < 16; i += 4 {
+			if c := simdMatM[j][i]; c != 0 {
+				a0 = a0.Xor(simdGfLo[c].PermuteOrZeroGrouped(lo[i]).Xor(simdGfHi[c].PermuteOrZeroGrouped(hi[i])))
 			}
-			acc = acc.Xor(simdGfLo[c].PermuteOrZeroGrouped(lo[i]).Xor(simdGfHi[c].PermuteOrZeroGrouped(hi[i])))
+
+			if c := simdMatM[j][i+1]; c != 0 {
+				a1 = a1.Xor(simdGfLo[c].PermuteOrZeroGrouped(lo[i+1]).Xor(simdGfHi[c].PermuteOrZeroGrouped(hi[i+1])))
+			}
+
+			if c := simdMatM[j][i+2]; c != 0 {
+				a2 = a2.Xor(simdGfLo[c].PermuteOrZeroGrouped(lo[i+2]).Xor(simdGfHi[c].PermuteOrZeroGrouped(hi[i+2])))
+			}
+
+			if c := simdMatM[j][i+3]; c != 0 {
+				a3 = a3.Xor(simdGfLo[c].PermuteOrZeroGrouped(lo[i+3]).Xor(simdGfHi[c].PermuteOrZeroGrouped(hi[i+3])))
+			}
 		}
-		out[j] = acc
+
+		out[j] = a0.Xor(a1).Xor(a2.Xor(a3))
 	}
 }
 
