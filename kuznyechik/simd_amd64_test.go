@@ -75,3 +75,20 @@ func FuzzEncryptBlocks_vs_Table(f *testing.F) {
 		}
 	})
 }
+
+func BenchmarkEncryptBlocks(b *testing.B) {
+	if !simdEncryptAvailable() {
+		b.Skip("AVX2 unavailable")
+	}
+
+	c := NewCipher(make([]byte, keySize))
+	src := make([]byte, 128*BlockSize)
+	dst := make([]byte, len(src))
+
+	b.SetBytes(int64(len(src)))
+	b.ResetTimer()
+
+	for range b.N {
+		c.EncryptBlocks(dst, src)
+	}
+}
