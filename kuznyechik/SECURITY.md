@@ -62,3 +62,14 @@ valgrind while the table path's secret-indexed loads are flagged (positive
 control). Shares the masking primitives with the constant-time EC scalar
 multiply via `internal/ct`. See `../gost3410curves/EXPERIMENT-ct.md` for the
 methodology.
+
+## Constant-time, fast: the SIMD batch path (experimental)
+
+For parallel modes there is a second constant-time path that is also *fast*:
+`Cipher.EncryptBlocks` batches 32 blocks through `simd/archsimd` (AVX2,
+data-oblivious `VPSHUFB`/arithmetic — no secret-indexed loads). It beats the
+*non*-constant-time table cipher (≈188 vs ≈247 ns/block) while leaking nothing.
+It is gated `//go:build goexperiment.simd && amd64` and off in every default
+build; the fallback is plain `Encrypt`. Validated by `FuzzEncryptBlocks_vs_Table`
+(≡ table cipher) and a dudect timing test with the table cipher as positive
+control. See `EXPERIMENT-simd.md`.
