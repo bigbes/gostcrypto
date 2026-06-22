@@ -1,0 +1,45 @@
+name: simd
+
+# Experimental SIMD batch encrypt (kuznyechik.EncryptBlocks), built with
+# GOEXPERIMENT=simd on amd64. It is excluded from the default `test` workflow
+# (the build tag is off there), so it gets its own job: build, vet, the
+# KAT/equivalence/fuzz-seed tests, a short fuzz sweep against the table oracle,
+# and the dudect timing test with the table cipher as positive control. AVX2 is
+# present on GitHub's ubuntu amd64 runners; archsimd dispatches at runtime.
+# See kuznyechik/EXPERIMENT-simd.md.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOEXPERIMENT: simd
+  CGO_ENABLED: "0"
+
+jobs:
+  simd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: build
+        run: go build ./kuznyechik/...
+
+      - name: vet
+        run: go vet ./kuznyechik/...
+
+      - name: test (KAT, equivalence, fuzz seeds)
+        run: go test ./kuznyechik/ -run 'Simd|EncryptBlocks'
+
+      - name: fuzz vs table oracle
+        run: go test ./kuznyechik/ -run x -fuzz FuzzEncryptBlocks_vs_Table -fuzztime 60s
+
+      - name: dudect timing (table cipher = positive control)
+        run: go test -tags dudect -run TestSimdDudect_vsTable ./kuznyechik/ -v
