@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("r?ne\xfa\x0fbBB\xe8c\x10198BB\xb3a\xe3b\x01")

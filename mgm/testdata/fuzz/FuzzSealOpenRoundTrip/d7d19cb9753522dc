@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("*C")
+[]byte("yYZ")
+[]byte("b9c0Y2A0201")
+[]byte("0022198079220000811120811201011\xaaaB298017170A11000")
+byte('\x00')

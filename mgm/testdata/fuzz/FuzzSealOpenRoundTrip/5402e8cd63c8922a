@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("0Y")
+[]byte("aB9")
+[]byte("2011170002020220X+!\x03\x03\x03\x03\x04A\x04\x04712Xb1")
+[]byte("17072AA7201180070")
+byte('\x18')

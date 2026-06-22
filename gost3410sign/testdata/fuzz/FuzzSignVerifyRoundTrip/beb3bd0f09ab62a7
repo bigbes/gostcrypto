@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("#\x1d\x1d\x1d\x1d1\xd1")
+[]byte("1\xd1%")
+[]byte("\x1d\x1d")

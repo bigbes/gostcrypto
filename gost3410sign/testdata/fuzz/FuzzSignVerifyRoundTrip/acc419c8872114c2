@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x8e_9\x1dn")
+[]byte("\x8e_")
+[]byte("\x8e\x1d9_")

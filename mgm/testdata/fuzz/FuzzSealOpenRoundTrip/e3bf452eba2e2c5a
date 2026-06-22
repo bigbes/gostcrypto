@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("\x11")
+[]byte("C9\xf0,Y\x00Bc")
+[]byte("                00000000        000000000")
+[]byte("9099000A00cA000000A00900000A0")
+byte('6')

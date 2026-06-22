@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("*")
+[]byte("Oo~\txz\xad")
+[]byte("Oo~\t\x97\xb77z")

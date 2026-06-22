@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("bc B\"72C7b!A2000.A20bY207B#\x000")
+[]byte("19")
+[]byte("2")

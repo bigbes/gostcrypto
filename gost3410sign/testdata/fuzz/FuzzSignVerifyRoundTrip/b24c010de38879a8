@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x00Z7\"n")
+[]byte("\xbcb\x04\x04\x04\x04\x04+\x96\x04")
+[]byte("x\x1d9A")

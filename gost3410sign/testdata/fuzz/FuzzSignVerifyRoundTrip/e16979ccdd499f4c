@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("00")
+[]byte("6vAf")
+[]byte("x\x1e*`+")

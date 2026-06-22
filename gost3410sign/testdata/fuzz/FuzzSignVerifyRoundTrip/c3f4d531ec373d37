@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("#")
+[]byte("#AI,\x88\xb2\x846")
+[]byte("#A")

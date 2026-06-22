@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("߹K\xad\x829\x901")

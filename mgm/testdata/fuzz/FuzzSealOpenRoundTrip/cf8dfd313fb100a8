@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("7")
+[]byte("\x19.")
+[]byte("000000       000000000")
+[]byte("9\x99100")
+byte('\x01')

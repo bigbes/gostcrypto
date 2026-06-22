@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("9Z#Y<#+d\x00$Y$\x000\xb72d\x00")

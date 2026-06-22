@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\"\x8f\x9d9)_7")
+[]byte("")
+[]byte("a\xf3\xf3\xf3'\xf3\xf3\xf3\x1d9_")

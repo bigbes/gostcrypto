@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("0*")
+[]byte("")
+[]byte("B\"\xff.XZ2ya\x04+_\xb8A$84\x8227")

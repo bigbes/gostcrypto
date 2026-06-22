@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x86\xf3")
+[]byte("a\x86*\\=\xe7")
+[]byte("\x86\xf3\xf3\x86")

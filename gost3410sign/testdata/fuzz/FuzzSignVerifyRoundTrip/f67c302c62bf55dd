@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("90J")
+[]byte("'1c\xa3\x921")
+[]byte("c")

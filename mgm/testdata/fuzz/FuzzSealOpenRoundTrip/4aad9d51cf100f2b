@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("AxYx1c")
+[]byte("#\"Xw")
+[]byte("19!'$&1 \x037)918XA Y27")
+[]byte("201200090000010070")
+byte('\x00')

@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\xe00")
+[]byte("\x12a\x05")
+[]byte("2")

@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("c\xfd!Z")
+[]byte("")
+[]byte("$\xfd!12\xef!Y")

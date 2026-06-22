@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\xad\xad\xad\xad\xad\xad\xad00")
+[]byte("\xf3")
+[]byte("21")

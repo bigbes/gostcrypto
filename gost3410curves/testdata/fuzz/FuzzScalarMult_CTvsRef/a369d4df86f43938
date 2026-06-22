@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("py7\x00\"7A\xff\xe3\x8bx")

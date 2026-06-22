@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("*\xfc\xf1.")
+[]byte("V\xfc\xe1e\x0fY$2")
+[]byte("VC\xe1")

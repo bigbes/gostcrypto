@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x99Y\x9d\x90\x99(J\xbf\xac.^e\xa9#2")
+[]byte("")
+[]byte("*0c\xfb*Y\xf1xy\x90\x99zb\xde\xc3#")

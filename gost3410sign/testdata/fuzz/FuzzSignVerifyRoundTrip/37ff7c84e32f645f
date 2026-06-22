@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("0'8%$")
+[]byte("gGI\x0fy\x98\x13\x98")
+[]byte("0")

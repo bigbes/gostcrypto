@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("7zY0")
+[]byte("")
+[]byte("7\\Y0C\x85%")

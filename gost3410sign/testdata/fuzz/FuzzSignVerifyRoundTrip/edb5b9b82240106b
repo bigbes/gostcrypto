@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("00000000")
+[]byte("")
+[]byte("\x16\xab\x96\xa7\xbdJ\xfa\x83p\x8dS>\xf0\x96Yy4[϶p\x18!QV\x99\x96d\xa7W8")

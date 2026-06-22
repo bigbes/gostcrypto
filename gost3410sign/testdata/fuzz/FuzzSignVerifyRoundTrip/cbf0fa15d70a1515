@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("0")
+[]byte("\xee")
+[]byte("c\x06\xb34\"")

@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("\x04")
+[]byte("yYZ")
+[]byte("19909100101")
+[]byte("001110011000")
+byte('\x00')

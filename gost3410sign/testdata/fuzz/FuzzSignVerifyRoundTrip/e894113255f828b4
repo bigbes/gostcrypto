@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\x190J")
+[]byte("")
+[]byte("\x19")
